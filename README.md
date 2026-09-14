@@ -13,13 +13,13 @@ A top-down HTML5 arena where time only flows when you move, and a blink-dash is 
 </p>
 
 <p align="center">
-  <strong><a href="https://ander507.github.io/CHRONO---BLINK/">Play in the browser</a></strong><br/>
-  No install. Or open <code>index.html</code> locally — same file.
+  <strong>Open <code>index.html</code> in a browser.</strong><br/>
+  No install, no build. Clone the repo, then double-click the file.
 </p>
 
 ## Quick start
 
-1. [Play it](https://ander507.github.io/CHRONO---BLINK/), or double-click `index.html`.
+1. Clone this repo and open `index.html` (double-click, or drag it onto a browser).
 2. Stand still. Time crawls. Move, and the arena wakes up.
 3. Blink through something. A hit refunds the dash. A miss costs 1.2s.
 
