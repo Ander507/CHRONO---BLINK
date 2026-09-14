@@ -7,9 +7,13 @@ A top-down HTML5 arena where time only flows when you move, and a blink-dash is 
 </p>
 
 <p align="center">
-  <a href="covers/gameplay-landscape.mp4"><strong>Gameplay (landscape)</strong></a>
-  &nbsp;·&nbsp;
-  <a href="covers/gameplay-portrait.mp4"><strong>Gameplay (portrait)</strong></a>
+  <img src="covers/gameplay-landscape.gif" alt="Gameplay on desktop — time crawls when you stop, blink-dash cuts through stalkers" width="720" /><br/>
+  <em>Desktop / landscape</em>
+</p>
+
+<p align="center">
+  <img src="covers/gameplay-portrait.gif" alt="Gameplay on phone — title, shop, and thumb controls in portrait" width="270" /><br/>
+  <em>Phone / portrait</em>
 </p>
 
 <p align="center">
@@ -41,7 +45,7 @@ That's the whole game. First run has a skippable in-game tutorial.
 - **Three readable threats.** Crimson stalkers chase, amber gunners telegraph shots, violet phantoms dart. Shape, color, and a charge cue are meant to match.
 - **Coins bank into Reach / Recovery / Magnet.** Spend between runs. The shop reflows: two columns in short landscape, stacked in portrait.
 - **Keyboard and thumbs.** AZERTY is first-class. Phone dash distance is capped so the landing reticle stays on screen.
-- **CrazyGames-ready, file://-safe.** Optional SDK for ads / cloud save. Offline, it falls back to `localStorage` and no-ops the rest.
+- **CrazyGames-ready, file://-safe.** The CrazyGames SDK only loads on CrazyGames (or localhost / `?cg=1` for testing). Everywhere else — itch, GitHub, `file://` — the game never fetches it and just uses `localStorage`.
 
 ## Run it locally
 
