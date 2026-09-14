@@ -1,0 +1,3533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#14131a">
+<title>CHRONO — BLINK</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=IBM+Plex+Sans:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{
+    width:100%;height:100%;overflow:hidden;background:#14131a;
+    touch-action:none;-webkit-user-select:none;user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    cursor:none;
+  }
+  canvas{
+    display:block;position:fixed;inset:0;
+    width:100%;height:100%;
+    touch-action:none;
+    image-rendering:auto;
+    cursor:none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function(){
+"use strict";
+
+// CHRONO // BLINK — single-file arcade. Optional CrazyGames SDK (ads, cloud
+// save, gameplay events). Offline / file:// still runs with localStorage only.
+
+var COL = {
+  bg:    '#14131a',
+  grid:  '#2a2833',
+  cyan:  '#7de8d6',
+  cyanD: '#3a8f84',
+  red:   '#e8453c',
+  redD:  '#8a2a24',
+  white: '#f2ece4',
+  amber: '#e8b86d',
+  violet:'#9a8fd4',
+  violetD:'#5a5288',
+  ink:   '#0c0b10',
+  mute:  'rgba(242,236,228,0.55)'
+};
+
+// Time never fully stops. At 0.08 the world still creeps, which keeps the
+// screen alive while you plan and stops the pause from feeling like a freeze.
+// TIME_LERP is what makes the shift a swell rather than a hard gear change.
+var TIME_IDLE      = 0.08;
+var TIME_ACTIVE    = 1.00;
+var TIME_LERP      = 9.0;
+
+var PLAYER_R       = 9;
+var PLAYER_SPEED   = 335;
+var DASH_DIST      = 240;
+var DASH_TIME      = 0.115;
+var DASH_COOLDOWN  = 1.2;
+// A sliver of invulnerability after you land, so you don't die to an enemy
+// that drifted into the spot you were always going to arrive at.
+var DASH_GRACE     = 0.06;
+
+var WAVE_INTERVAL  = 10;
+
+var PROJ_SPEED     = 165;
+var PROJ_R         = 6;
+
+// Slices read as generous on purpose. Pixel-exact hitboxes on a 240px lunge
+// feel broken even when they're correct, so the blade is fattened by this much.
+var SLICE_PAD      = 13;
+
+var HS_KEY = 'chronoBlink.highScore.v1';
+var TUT_KEY = 'chronoBlink.tutorial.v1';
+var COINS_KEY = 'chronoBlink.coins.v1';
+var UP_KEY = 'chronoBlink.upgrades.v1';
+var NEAR_MISS_PAD = 34;
+var CHAIN_WINDOW  = 0.42;
+var COMBO_TIME    = 2.75; // real seconds; no kill before this and the chain dies
+var MAGNET_R_BASE = 180;
+var MAGNET_T_BASE = 0.45;
+var UPGRADE_COSTS = [25, 60, 120];
+var UPGRADE_MAX = 3;
+var REWARD_COINS = 25; // unused legacy; 2× uses runCoins
+
+// ---- CrazyGames SDK (safe no-op offline / file:// / disabled env) ----
+var CG = {
+  ready: false,
+  env: 'offline',
+  sdk: null,
+  data: null,
+  adOpen: false,
+  muteWas: false,
+  gameplayOn: false,
+  sdkMute: false
+};
+
+function storeGet(key){
+  if(CG.ready && CG.data){
+    try {
+      var v = CG.data.getItem(key);
+      if(v != null) return v;
+    } catch(e){}
+  }
+  try { return localStorage.getItem(key); } catch(e){ return null; }
+}
+function storeSet(key, value){
+  value = String(value);
+  if(CG.ready && CG.data){
+    try {
+      CG.data.setItem(key, value);
+      return;
+    } catch(e){}
+  }
+  try { localStorage.setItem(key, value); } catch(e){}
+}
+function cgCall(fn){
+  if(!CG.ready || !CG.sdk) return;
+  try { fn(CG.sdk); } catch(e){}
+}
+function cgLoadingStart(){ cgCall(function(s){ s.game.loadingStart(); }); }
+function cgLoadingStop(){ cgCall(function(s){ s.game.loadingStop(); }); }
+function cgGameplayStart(){
+  if(CG.gameplayOn) return;
+  CG.gameplayOn = true;
+  cgCall(function(s){ s.game.gameplayStart(); });
+}
+function cgGameplayStop(){
+  if(!CG.gameplayOn) return;
+  CG.gameplayOn = false;
+  cgCall(function(s){ s.game.gameplayStop(); });
+}
+function cgHappyTime(){ cgCall(function(s){ s.game.happytime(); }); }
+function applySdkMute(settings){
+  var mute = !!(settings && settings.muteAudio);
+  if(/[?&]muteAudio=true(?:&|$)/.test(location.search)) mute = true;
+  CG.sdkMute = mute;
+  if(mute) SFX.muted = true;
+}
+function wireSdkSettings(){
+  if(!CG.sdk || !CG.sdk.game) return;
+  try {
+    applySdkMute(CG.sdk.game.settings);
+    if(typeof CG.sdk.game.addSettingsChangeListener === 'function'){
+      CG.sdk.game.addSettingsChangeListener(function(s){ applySdkMute(s); });
+    }
+  } catch(e){}
+}
+function cgAdsOk(){
+  return CG.ready && (CG.env === 'local' || CG.env === 'crazygames');
+}
+function cgAdBegin(){
+  CG.adOpen = true;
+  CG.muteWas = SFX.muted;
+  SFX.muted = true;
+  try { if(SFX.ac && SFX.ac.state === 'running') SFX.ac.suspend(); } catch(e){}
+  paused = true;
+}
+function cgAdEnd(){
+  CG.adOpen = false;
+  SFX.muted = CG.sdkMute ? true : CG.muteWas;
+  try { if(SFX.ac && SFX.ac.state === 'suspended') SFX.ac.resume(); } catch(e){}
+  paused = false;
+}
+function cgRequestAd(type, onDone, onReward){
+  var settled = false;
+  function endAudio(){
+    if(CG.adOpen) cgAdEnd();
+  }
+  function fail(){
+    if(settled) return;
+    settled = true;
+    endAudio();
+    if(onDone) onDone(false);
+  }
+  function win(){
+    if(settled) return;
+    settled = true;
+    endAudio();
+    if(onReward) onReward();
+    if(onDone) onDone(true);
+  }
+  if(!cgAdsOk() || !CG.sdk || !CG.sdk.ad){
+    if(onDone) onDone(false);
+    return;
+  }
+  try {
+    CG.sdk.ad.requestAd(type, {
+      adStarted: function(){ cgAdBegin(); },
+      adFinished: function(){ win(); },
+      adError: function(){ fail(); }
+    });
+  } catch(e){
+    fail();
+  }
+}
+function cgMidgame(onDone){ if(onDone) onDone(false); }
+function cgRewarded(onReward){ cgRequestAd('rewarded', null, onReward); }
+
+function migrateLocalToData(){
+  if(!CG.data) return;
+  var keys = [HS_KEY, TUT_KEY, COINS_KEY, UP_KEY];
+  for(var i=0;i<keys.length;i++){
+    var k = keys[i];
+    try {
+      if(CG.data.getItem(k) != null) continue;
+      var loc = null;
+      try { loc = localStorage.getItem(k); } catch(e){}
+      if(loc != null) CG.data.setItem(k, loc);
+    } catch(e){}
+  }
+}
+function loadProgress(){
+  try { highScore = parseInt(storeGet(HS_KEY) || '0', 10) || 0; } catch(e){ highScore = 0; }
+  try { tutorialSeen = storeGet(TUT_KEY) === '1'; } catch(e){ tutorialSeen = false; }
+  try { bankedCoins = Math.max(0, parseInt(storeGet(COINS_KEY) || '0', 10) || 0); } catch(e){ bankedCoins = 0; }
+  try {
+    var rawUp = JSON.parse(storeGet(UP_KEY) || '{}');
+    upgrades.reach = clamp(rawUp.reach|0, 0, UPGRADE_MAX);
+    upgrades.recovery = clamp(rawUp.recovery|0, 0, UPGRADE_MAX);
+    upgrades.magnet = clamp(rawUp.magnet|0, 0, UPGRADE_MAX);
+  } catch(e){}
+}
+function initCrazyGames(){
+  return new Promise(function(resolve){
+    // Never block local file opens — SDK needs http(s)/localhost.
+    if(location.protocol === 'file:'){
+      CG.env = 'offline';
+      resolve(false);
+      return;
+    }
+    var sdk = window.CrazyGames && window.CrazyGames.SDK;
+    if(!sdk || typeof sdk.init !== 'function'){
+      CG.env = 'offline';
+      resolve(false);
+      return;
+    }
+    var settled = false;
+    function done(ok){
+      if(settled) return;
+      settled = true;
+      resolve(!!ok);
+    }
+    setTimeout(function(){ done(false); }, 4000);
+    sdk.init().then(function(){
+      try { CG.env = sdk.environment || 'unknown'; } catch(e){ CG.env = 'unknown'; }
+      if(CG.env === 'disabled'){
+        CG.ready = false;
+        done(false);
+        return;
+      }
+      CG.ready = true;
+      CG.sdk = sdk;
+      CG.data = sdk.data || null;
+      try { sdk.game.loadingStart(); } catch(e){}
+      migrateLocalToData();
+      loadProgress();
+      wireSdkSettings();
+      try { sdk.game.loadingStop(); } catch(e){}
+      done(true);
+    }).catch(function(){
+      CG.ready = false;
+      CG.env = 'offline';
+      done(false);
+    });
+  });
+}
+function loadCrazyGamesSdkScript(){
+  return new Promise(function(resolve){
+    if(location.protocol === 'file:'){ resolve(false); return; }
+    if(window.CrazyGames && window.CrazyGames.SDK){ resolve(true); return; }
+    var s = document.createElement('script');
+    s.src = 'https://sdk.crazygames.com/crazygames-sdk-v3.js';
+    s.async = true;
+    var settled = false;
+    function done(ok){
+      if(settled) return;
+      settled = true;
+      resolve(!!ok);
+    }
+    s.onload = function(){ done(true); };
+    s.onerror = function(){ done(false); };
+    setTimeout(function(){ done(!!(window.CrazyGames && window.CrazyGames.SDK)); }, 4000);
+    document.head.appendChild(s);
+  });
+}
+
+var canvas = document.getElementById('game');
+var ctx    = canvas.getContext('2d');
+
+// Two spare canvases exist purely for the RGB-split effect. `buf` holds a clean
+// copy of the frame and `chan` is scratch space for pulling one colour channel
+// out of it. Both stay allocated because the effect fires several times a second
+// during a good combo and churning canvases mid-run stutters.
+var buf    = document.createElement('canvas');
+var bctx   = buf.getContext('2d');
+var chan   = document.createElement('canvas');
+var cctx   = chan.getContext('2d');
+
+var W = 0, H = 0, DPR = 1;
+var scanPattern = null;
+var dust = [];
+
+// The scanlines used to be a fillRect per row, which on a tall display meant
+// ~480 draw calls every frame for a static texture. A 1x3 repeating tile does
+// the same job in one fill.
+function buildScanPattern(){
+  var t = document.createElement('canvas');
+  t.width = 1; t.height = 4;
+  var tc = t.getContext('2d');
+  tc.fillStyle = '#000';
+  tc.fillRect(0, 0, 1, 1);
+  scanPattern = ctx.createPattern(t, 'repeat');
+}
+
+function resize(){
+  // Phones report 3x and even 4x, which triples the fill cost of every glow.
+  // 1.5 keeps edges clean without the full 2x fill tax.
+  DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  try {
+    if(window.visualViewport && window.visualViewport.width){
+      W = Math.max(1, Math.round(window.visualViewport.width));
+      H = Math.max(1, Math.round(window.visualViewport.height));
+    }
+  } catch(err){}
+  [ [canvas,ctx], [buf,bctx], [chan,cctx] ].forEach(function(p){
+    p[0].width  = Math.max(1, Math.round(W * DPR));
+    p[0].height = Math.max(1, Math.round(H * DPR));
+    p[1].setTransform(DPR, 0, 0, DPR, 0, 0);
+  });
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  buildScanPattern();
+  if(typeof dust !== 'undefined' && dust) initDust();
+  // Keep actors inside the new viewport after rotate / URL-bar resize.
+  if(player){
+    player.x = clamp(player.x, PLAYER_R, Math.max(PLAYER_R, W - PLAYER_R));
+    player.y = clamp(player.y, PLAYER_R, Math.max(PLAYER_R, H - PLAYER_R));
+  }
+  if(Array.isArray(enemies)){
+    for(var i=0;i<enemies.length;i++){
+      var er = enemies[i].r || 12;
+      enemies[i].x = clamp(enemies[i].x, er, Math.max(er, W - er));
+      enemies[i].y = clamp(enemies[i].y, er, Math.max(er, H - er));
+    }
+  }
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', function(){ setTimeout(resize, 120); });
+try {
+  if(window.visualViewport){
+    window.visualViewport.addEventListener('resize', resize);
+    window.visualViewport.addEventListener('scroll', resize);
+  }
+} catch(err){}
+resize();
+
+// Map client coordinates into game space. visualViewport scroll / CSS size can
+// diverge from W×H; touch/mouse must not assume 1:1 with clientX/Y.
+function pointerToGame(clientX, clientY){
+  var rect = canvas.getBoundingClientRect();
+  var rw = Math.max(1, rect.width);
+  var rh = Math.max(1, rect.height);
+  return {
+    x: (clientX - rect.left) * (W / rw),
+    y: (clientY - rect.top) * (H / rh)
+  };
+}
+
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+function rand(a,b){ return a + Math.random()*(b-a); }
+function randInt(a,b){ return Math.floor(rand(a,b+1)); }
+function dist2(ax,ay,bx,by){ var dx=bx-ax, dy=by-ay; return dx*dx+dy*dy; }
+function len(x,y){ return Math.sqrt(x*x+y*y); }
+function norm(x,y){ var l=Math.sqrt(x*x+y*y); return l>1e-6?{x:x/l,y:y/l}:{x:0,y:0}; }
+function pad6(n){
+  var s = String(n|0);
+  while(s.length < 6) s = '0' + s;
+  return s;
+}
+
+// Distance from a point to a line segment, kept squared so nothing takes a
+// square root. This is the whole combat system: a dash is a segment and every
+// enemy is a circle, so "did the blade connect" is one call to segCircle.
+function segPointDist2(ax,ay,bx,by,px,py){
+  var dx=bx-ax, dy=by-ay;
+  var l2=dx*dx+dy*dy;
+  if(l2 < 1e-9) return dist2(ax,ay,px,py);
+  var t = ((px-ax)*dx + (py-ay)*dy) / l2;
+  t = clamp(t,0,1);
+  var cx=ax+t*dx, cy=ay+t*dy;
+  return dist2(cx,cy,px,py);
+}
+function segCircle(ax,ay,bx,by,cx,cy,r){
+  return segPointDist2(ax,ay,bx,by,cx,cy) <= r*r;
+}
+
+// Every sound is built from oscillators and filtered noise at the moment it
+// plays. Browsers refuse to start an AudioContext until the user has actually
+// touched something, so nothing here is created until the first key or click and
+// every method no-ops harmlessly before then.
+var SFX = {
+  ac: null,
+  master: null,
+  noise: null,
+  ready: false,
+  muted: false,
+
+  init: function(){
+    if(this.ac) return;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    try { this.ac = new AC(); } catch(e){ return; }
+    this.master = this.ac.createGain();
+    this.master.gain.value = 0.55;
+    // A long combo can fire six or seven overlapping slices. Without the
+    // compressor riding them down the sum clips into ugly digital crunch.
+    var comp = null;
+    try {
+      comp = this.ac.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.knee.value = 22;
+      comp.ratio.value = 8; comp.attack.value = 0.003; comp.release.value = 0.2;
+      this.master.connect(comp); comp.connect(this.ac.destination);
+    } catch(e){ this.master.connect(this.ac.destination); }
+
+    // One noise buffer, filled once, shared by every burst. Generating a fresh
+    // one per sound would allocate a couple of hundred KB mid-combat.
+    var n = Math.floor(this.ac.sampleRate * 1.2);
+    var b = this.ac.createBuffer(1, n, this.ac.sampleRate);
+    var d = b.getChannelData(0);
+    for(var i=0;i<n;i++) d[i] = Math.random()*2-1;
+    this.noise = b;
+    this.ready = true;
+  },
+
+  resume: function(){
+    this.init();
+    if(this.ac && this.ac.state === 'suspended'){ this.ac.resume(); }
+  },
+
+  t: function(){ return this.ac ? this.ac.currentTime : 0; },
+
+  // One pitched voice with an optional filter sweep. Note the 0.0001 floors on
+  // every gain and the Math.max(1, ...) on every frequency: exponential ramps
+  // throw if either endpoint is zero, so nothing is ever allowed to reach it.
+  tone: function(o){
+    if(!this.ready || this.muted) return;
+    var ac=this.ac, t0=this.t() + (o.delay||0);
+    var osc = ac.createOscillator();
+    osc.type = o.type || 'sine';
+    var g = ac.createGain();
+    var dur = o.dur || 0.2;
+    var vol = (o.vol==null?0.2:o.vol);
+
+    osc.frequency.setValueAtTime(o.f0, t0);
+    if(o.f1 != null){
+      if(o.exp === false) osc.frequency.linearRampToValueAtTime(Math.max(1,o.f1), t0+dur);
+      else osc.frequency.exponentialRampToValueAtTime(Math.max(1,o.f1), t0+dur);
+    }
+    var atk = o.atk==null?0.004:o.atk;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol, t0+atk);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+
+    var node = osc;
+    if(o.filter){
+      var f = ac.createBiquadFilter();
+      f.type = o.filter;
+      f.frequency.setValueAtTime(o.fc0 || 1200, t0);
+      if(o.fc1 != null) f.frequency.exponentialRampToValueAtTime(Math.max(20,o.fc1), t0+dur);
+      f.Q.value = o.q==null?1:o.q;
+      node.connect(f); f.connect(g);
+    } else {
+      node.connect(g);
+    }
+    g.connect(this.master);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  },
+
+  // Noise shaped by a moving filter. Every impact, whoosh and rumble in the game
+  // is this plus a tone or two stacked on top.
+  burst: function(o){
+    if(!this.ready || this.muted) return;
+    var ac=this.ac, t0=this.t() + (o.delay||0);
+    var src = ac.createBufferSource();
+    src.buffer = this.noise;
+    src.playbackRate.value = o.rate || 1;
+    var f = ac.createBiquadFilter();
+    f.type = o.filter || 'bandpass';
+    f.frequency.setValueAtTime(o.fc0 || 1000, t0);
+    if(o.fc1 != null) f.frequency.exponentialRampToValueAtTime(Math.max(20,o.fc1), t0+(o.dur||0.2));
+    f.Q.value = o.q==null?1.1:o.q;
+    var g = ac.createGain();
+    var dur = o.dur || 0.2, vol = (o.vol==null?0.15:o.vol);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol, t0+(o.atk==null?0.006:o.atk));
+    g.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    // Random offset into the buffer so repeated bursts don't sound like a loop.
+    src.start(t0, Math.random()*0.4);
+    src.stop(t0+dur+0.03);
+  },
+
+  dash: function(){
+    this.burst({ filter:'bandpass', fc0:260, fc1:2600, q:0.8, dur:0.24, vol:0.22 });
+    this.tone({ type:'sawtooth', f0:180, f1:70, dur:0.18, vol:0.10, filter:'lowpass', fc0:1400, fc1:300 });
+  },
+
+  // The slice climbs a semitone-ish per combo step, so a long chain walks up the
+  // scale and you can hear how well you're doing without looking at the counter.
+  // Capped at 14 or a monster run turns into an ear-splitting whistle.
+  slice: function(combo){
+    var c = clamp(combo,1,14);
+    var base = 780 * Math.pow(1.055, c-1);
+    this.tone({ type:'square',   f0:base,      f1:base*0.22, dur:0.085, vol:0.16, filter:'highpass', fc0:400 });
+    this.tone({ type:'square',   f0:base*1.51, f1:base*0.35, dur:0.065, vol:0.09, filter:'highpass', fc0:600 });
+    this.burst({ filter:'highpass', fc0:3400, fc1:7000, q:0.7, dur:0.09, vol:0.20 });
+    this.tone({ type:'triangle', f0:base*0.5,  f1:base*0.16, dur:0.13, vol:0.10 });
+  },
+
+  comboUp: function(n){
+    var f = 440 * Math.pow(1.1225, clamp(n,1,20));
+    this.tone({ type:'triangle', f0:f, f1:f*1.5, dur:0.13, vol:0.13 });
+    this.tone({ type:'sine',     f0:f*2, f1:f*3, dur:0.1,  vol:0.06, delay:0.02 });
+    if(n >= 5){
+      this.tone({ type:'sawtooth', f0:f*0.5, f1:f*2.2, dur:0.18, vol:0.08, filter:'lowpass', fc0:1800 });
+    }
+    if(n >= 8){
+      this.burst({ filter:'bandpass', fc0:800, fc1:4200, q:0.6, dur:0.2, vol:0.14 });
+    }
+    if(n >= 12){
+      this.tone({ type:'square', f0:f*0.25, f1:f*4, dur:0.22, vol:0.1, filter:'highpass', fc0:200 });
+      this.burst({ filter:'highpass', fc0:2000, fc1:8000, q:0.5, dur:0.25, vol:0.16 });
+    }
+  },
+
+  comboBreak: function(){
+    this.tone({ type:'sawtooth', f0:220, f1:55, dur:0.28, vol:0.12, filter:'lowpass', fc0:900, fc1:180 });
+    this.burst({ filter:'lowpass', fc0:600, fc1:120, q:0.7, dur:0.2, vol:0.1 });
+  },
+
+  // Metronome that runs while time is crawling. It's the audible cue that the
+  // world is waiting on you rather than hung.
+  tick: function(){
+    this.tone({ type:'sine', f0:2050, f1:1750, dur:0.035, vol:0.035 });
+  },
+
+  shoot: function(){
+    this.tone({ type:'sawtooth', f0:300, f1:130, dur:0.14, vol:0.07, filter:'lowpass', fc0:900, fc1:260 });
+  },
+
+  charge: function(){
+    this.tone({ type:'sawtooth', f0:180, f1:520, dur:0.22, vol:0.05, filter:'lowpass', fc0:700, fc1:1600 });
+  },
+
+  phase: function(){
+    this.tone({ type:'sine', f0:880, f1:440, dur:0.12, vol:0.04 });
+    this.tone({ type:'triangle', f0:1320, f1:660, dur:0.1, vol:0.03, delay:0.02 });
+  },
+
+  nearMiss: function(){
+    this.tone({ type:'triangle', f0:520, f1:180, dur:0.12, vol:0.08 });
+    this.burst({ filter:'highpass', fc0:1800, fc1:4200, q:0.8, dur:0.06, vol:0.08 });
+  },
+
+  whiff: function(){
+    this.tone({ type:'sawtooth', f0:90, f1:40, dur:0.22, vol:0.09, filter:'lowpass', fc0:500, fc1:120 });
+  },
+
+  spawn: function(){
+    this.tone({ type:'sine', f0:120, f1:220, dur:0.16, vol:0.05 });
+  },
+
+  pop: function(){
+    this.burst({ filter:'bandpass', fc0:2200, fc1:900, q:1.4, dur:0.07, vol:0.10 });
+  },
+
+  wave: function(){
+    this.tone({ type:'square', f0:160, f1:320, dur:0.3, vol:0.10, filter:'lowpass', fc0:1200 });
+    this.tone({ type:'square', f0:240, f1:480, dur:0.34, vol:0.07, filter:'lowpass', fc0:1600, delay:0.08 });
+  },
+
+  fail: function(){
+    this.tone({ type:'sawtooth', f0:70, f1:24, dur:1.5, vol:0.30, filter:'lowpass', fc0:800, fc1:90 });
+    this.tone({ type:'square',   f0:110, f1:30, dur:1.1, vol:0.14, filter:'lowpass', fc0:600, fc1:80 });
+    this.burst({ filter:'lowpass', fc0:900, fc1:60, q:0.6, dur:1.4, vol:0.24, rate:0.6 });
+  },
+
+  start: function(){
+    this.tone({ type:'triangle', f0:220, f1:880, dur:0.3, vol:0.14 });
+    this.tone({ type:'sine',     f0:440, f1:1760, dur:0.34, vol:0.08, delay:0.05 });
+  },
+
+  coin: function(){
+    this.tone({ type:'sine', f0:920, f1:1380, dur:0.07, vol:0.07 });
+    this.tone({ type:'triangle', f0:1380, f1:1840, dur:0.05, vol:0.04, delay:0.02 });
+  },
+
+  buy: function(){
+    this.tone({ type:'triangle', f0:330, f1:660, dur:0.14, vol:0.1 });
+    this.tone({ type:'sine', f0:520, f1:1040, dur:0.12, vol:0.06, delay:0.04 });
+  }
+};
+
+// A bare object rather than {} so a key literally named "constructor" or
+// "toString" can't collide with anything inherited.
+var keys = Object.create(null);
+var mouse = { down:false, right:false };
+var rawMouse = { x: W*0.5, y: H*0.5 };
+var aim = { x: W*0.5, y: H*0.5, angle: 0 };
+var reticleSpread = 0;
+
+// hasTouch tells us what to print on the title card; usingTouch tracks what the
+// player last actually touched. A laptop with a touchscreen has the first but not
+// necessarily the second, so aiming keeps following the mouse until a finger lands.
+var hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+var usingTouch = false;
+
+var moveTouch = null;
+var aimTouch  = null;
+
+// Input is latched into these rather than acted on inside the handler, so a dash
+// always resolves inside the update step where dt and positions are consistent.
+var dashRequest = false;
+var anyRequest  = false;
+
+function firstInteraction(){ SFX.resume(); }
+
+window.addEventListener('keydown', function(e){
+  // Holding space would otherwise machine-gun dash requests at the OS repeat
+  // rate. The preventDefault still has to happen or the page scrolls.
+  if(e.repeat){
+    if(e.code==='Space'||e.code.indexOf('Arrow')===0) e.preventDefault();
+    return;
+  }
+  firstInteraction();
+  keys[e.code] = true;
+  if(e.code==='Space' || e.code.indexOf('Arrow')===0 || e.code==='Tab'){ e.preventDefault(); }
+  if(e.code==='Space'){
+    if(state === 'title'){ e.preventDefault(); startGame(); return; }
+    if(state === 'over'){ e.preventDefault(); return; }
+    dashRequest = true; anyRequest = true;
+  }
+  if(e.code==='Enter'){
+    if(state === 'title') startGame();
+    else if(state === 'over') startGame();
+    else anyRequest = true;
+  }
+  // Escape exits browser fullscreen on CrazyGames — never bind it in-game.
+  if(e.code==='Backspace' && state === 'over'){
+    e.preventDefault(); goToMenu();
+  }
+  if(e.code==='KeyM'){
+    if(CG.sdkMute) return; // CrazyGames mute wins over in-game toggle
+    SFX.muted = !SFX.muted;
+  }
+  if(e.code==='KeyP' && state==='playing' && !CG.adOpen){
+    paused = !paused;
+    if(paused) cgGameplayStop();
+    else cgGameplayStart();
+  }
+  if(e.code==='KeyX' && state==='playing' && tutorial.active){
+    e.preventDefault(); skipTutorial();
+  }
+}, {passive:false});
+
+window.addEventListener('keyup', function(e){ keys[e.code] = false; });
+
+// Alt-tabbing mid-strafe never delivers the keyup, which would leave the game
+// convinced you're still holding W: time stays at full speed and you drift into
+// a wall while looking at another window. Wipe the whole set instead.
+window.addEventListener('blur', function(){ keys = Object.create(null); });
+
+canvas.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+
+window.addEventListener('mousemove', function(e){
+  usingTouch = false;
+  var p = pointerToGame(e.clientX, e.clientY);
+  rawMouse.x = p.x; rawMouse.y = p.y;
+});
+
+window.addEventListener('mousedown', function(e){
+  firstInteraction();
+  usingTouch = false;
+  var p = pointerToGame(e.clientX, e.clientY);
+  rawMouse.x = p.x; rawMouse.y = p.y;
+  if(state === 'title'){
+    if(e.button === 0){
+      if(hitBtn(deployBtn, rawMouse.x, rawMouse.y)) startGame();
+      else tryHitShop(rawMouse.x, rawMouse.y);
+    }
+    return;
+  }
+  if(state === 'over'){
+    if(e.button === 0){
+      if(hitBtn(againBtn, rawMouse.x, rawMouse.y)) startGame();
+      else if(hitBtn(menuBtn, rawMouse.x, rawMouse.y)) goToMenu();
+      else if(hitBtn(rewardBtn, rawMouse.x, rawMouse.y)) claimDoubleCoins();
+      else if(hitBtn(reviveBtn, rawMouse.x, rawMouse.y)) claimRevive();
+      else tryHitShop(rawMouse.x, rawMouse.y);
+    }
+    return;
+  }
+  if(e.button === 0 && tutorial.active && hitBtn(skipBtn, rawMouse.x, rawMouse.y)){
+    skipTutorial();
+    return;
+  }
+  if(e.button === 2){ mouse.right = true; dashRequest = true; e.preventDefault(); }
+  else if(e.button === 0){ mouse.down = true; }
+  anyRequest = true;
+}, {passive:false});
+
+window.addEventListener('mouseup', function(e){
+  if(e.button === 2) mouse.right = false;
+  if(e.button === 0) mouse.down = false;
+});
+
+// Touch splits the screen in two: a thumbstick that appears wherever the left
+// hand lands, and a drag-and-release gesture on the right that flings the blade
+// along the direction you dragged. Claiming the left zone at 45% rather than 50%
+// biases the bigger half to aiming, which is the finicky half.
+canvas.addEventListener('touchstart', function(e){
+  firstInteraction();
+  usingTouch = true;
+  for(var i=0;i<e.changedTouches.length;i++){
+    var t = e.changedTouches[i];
+    var p = pointerToGame(t.clientX, t.clientY);
+    if(state === 'title'){
+      if(hitBtn(deployBtn, p.x, p.y)) startGame();
+      else tryHitShop(p.x, p.y);
+      e.preventDefault();
+      return;
+    }
+    if(state === 'over'){
+      if(hitBtn(againBtn, p.x, p.y)) startGame();
+      else if(hitBtn(menuBtn, p.x, p.y)) goToMenu();
+      else if(hitBtn(rewardBtn, p.x, p.y)) claimDoubleCoins();
+      else if(hitBtn(reviveBtn, p.x, p.y)) claimRevive();
+      else tryHitShop(p.x, p.y);
+      e.preventDefault();
+      return;
+    }
+    if(tutorial.active && hitBtn(skipBtn, p.x, p.y)){
+      skipTutorial();
+      e.preventDefault();
+      return;
+    }
+    // Move stick must NOT write rawMouse — that was steering blink aim at the
+    // MOVE pad whenever the left thumb was down (see mobile playtest frames).
+    if(p.x < W*0.45 && !moveTouch){
+      moveTouch = { id:t.identifier, ox:p.x, oy:p.y, x:p.x, y:p.y };
+    } else if(!aimTouch){
+      aimTouch = { id:t.identifier, sx:p.x, sy:p.y, x:p.x, y:p.y };
+    }
+  }
+  e.preventDefault();
+}, {passive:false});
+
+canvas.addEventListener('touchmove', function(e){
+  for(var i=0;i<e.changedTouches.length;i++){
+    var t = e.changedTouches[i];
+    var p = pointerToGame(t.clientX, t.clientY);
+    if(moveTouch && t.identifier === moveTouch.id){ moveTouch.x = p.x; moveTouch.y = p.y; }
+    if(aimTouch  && t.identifier === aimTouch.id ){ aimTouch.x  = p.x; aimTouch.y  = p.y; }
+  }
+  e.preventDefault();
+}, {passive:false});
+
+function endTouch(e){
+  for(var i=0;i<e.changedTouches.length;i++){
+    var t = e.changedTouches[i];
+    if(moveTouch && t.identifier === moveTouch.id){ moveTouch = null; }
+    if(aimTouch && t.identifier === aimTouch.id){
+      var dx = aimTouch.x - aimTouch.sx, dy = aimTouch.y - aimTouch.sy;
+      var l = len(dx,dy);
+      var dd = effectiveDashDist();
+      // Drag: aim along flick direction in world space (never unit-vector aim.x/y —
+      // that made the next updateAim point at the origin and break the dash).
+      // Short tap: keep the last blink heading.
+      if(l > 14){
+        var n = norm(dx, dy);
+        aim.angle = Math.atan2(n.y, n.x);
+        aim.x = player.x + n.x * dd;
+        aim.y = player.y + n.y * dd;
+        rawMouse.x = aim.x;
+        rawMouse.y = aim.y;
+      }
+      dashRequest = true;
+      aimTouch = null;
+    }
+  }
+  e.preventDefault();
+}
+canvas.addEventListener('touchend', endTouch, {passive:false});
+canvas.addEventListener('touchcancel', endTouch, {passive:false});
+
+// Returns a direction of length 0..1. Keyboard is always full tilt and gets
+// normalised so diagonals aren't faster; the thumbstick is analogue, and its
+// magnitude matters because a gentle lean should not wake time all the way up.
+function moveVector(){
+  var x = 0, y = 0;
+  // WASD + AZERTY ZQSD + arrows — adapt to layout without a remap UI.
+  if(keys['KeyA']||keys['KeyQ']||keys['ArrowLeft'])  x -= 1;
+  if(keys['KeyD']||keys['ArrowRight']) x += 1;
+  if(keys['KeyW']||keys['KeyZ']||keys['ArrowUp'])    y -= 1;
+  if(keys['KeyS']||keys['ArrowDown'])  y += 1;
+  if(x||y){ var n = norm(x,y); return n; }
+  if(moveTouch){
+    var dx = moveTouch.x - moveTouch.ox, dy = moveTouch.y - moveTouch.oy;
+    var l = len(dx,dy);
+    if(l > 8){
+      var m = Math.min(1, l/58);
+      return { x:(dx/l)*m, y:(dy/l)*m };
+    }
+  }
+  return { x:0, y:0 };
+}
+
+var state = 'title';   // title | playing | over
+var paused = false;
+
+var player = null;
+var enemies = [], projectiles = [], shards = [], trails = [], pops = [], floaters = [];
+var coins = [];
+var runCoins = 0;
+var magnetT = 0;
+var bankedCoins = 0;
+var upgrades = { reach: 0, recovery: 0, magnet: 0 };
+var goalBanner = 0;
+var runCoinBanked = false;
+var gameFinished = false;
+var rewardClaimed = false; // 2× coins claimed this over screen
+var reviveUsed = false;
+var overSettled = false;   // coins locked in (1× or 2×)
+var finishingFlow = false;
+
+function saveBank(){
+  storeSet(COINS_KEY, bankedCoins);
+}
+function saveUpgrades(){
+  storeSet(UP_KEY, JSON.stringify(upgrades));
+}
+function dashDist(){ return DASH_DIST * (1 + upgrades.reach * 0.08); }
+// On phones the playfield is often shorter than a full desktop dash. Cap the
+// blink so the landing reticle stays on-screen and drag→angle math stays honest.
+function effectiveDashDist(){
+  var base = dashDist();
+  var cap = Math.min(W, H) * 0.42;
+  return Math.min(base, Math.max(140, cap));
+}
+function dashCd(){ return DASH_COOLDOWN * (1 - upgrades.recovery * 0.08); }
+function magnetRadius(){ return MAGNET_R_BASE * (1 + upgrades.magnet * 0.28); }
+function magnetDuration(){ return MAGNET_T_BASE * (1 + upgrades.magnet * 0.22); }
+function upgradeCost(id){
+  var lvl = upgrades[id]|0;
+  if(lvl >= UPGRADE_MAX) return 0;
+  return UPGRADE_COSTS[lvl];
+}
+function tryBuyUpgrade(id){
+  if(!upgrades.hasOwnProperty(id)) return false;
+  var lvl = upgrades[id]|0;
+  if(lvl >= UPGRADE_MAX) return false;
+  var cost = UPGRADE_COSTS[lvl];
+  if(bankedCoins < cost) return false;
+  bankedCoins -= cost;
+  upgrades[id] = lvl + 1;
+  saveBank();
+  saveUpgrades();
+  SFX.buy();
+  return true;
+}
+function settleRunCoins(mult){
+  if(overSettled || runCoinBanked) return 0;
+  var m = mult == null ? 1 : mult;
+  var gain = Math.floor(runCoins * m);
+  bankedCoins += gain;
+  runCoinBanked = true;
+  overSettled = true;
+  saveBank();
+  return gain;
+}
+function claimDoubleCoins(){
+  if(rewardClaimed || state !== 'over' || CG.adOpen) return;
+  if(runCoins <= 0){
+    floatText(W * 0.5, H * 0.4, 'NO COINS TO DOUBLE', COL.mute, 14);
+    return;
+  }
+  if(!cgAdsOk()){
+    floatText(W * 0.5, H * 0.4, 'ADS UNAVAILABLE', COL.mute, 14);
+    return;
+  }
+  cgRewarded(function(){
+    if(rewardClaimed || state !== 'over') return;
+    rewardClaimed = true;
+    // Run coins are already banked 1× on death; rewarded adds the second copy.
+    var gain = Math.floor(runCoins);
+    if(!runCoinBanked) gain = settleRunCoins(2);
+    else {
+      bankedCoins += gain;
+      saveBank();
+    }
+    SFX.buy();
+    floatText(W * 0.5, H * 0.36, '2×  +' + gain, COL.amber, 18);
+  });
+}
+function claimRevive(){
+  if(reviveUsed || state !== 'over' || CG.adOpen) return;
+  if(!cgAdsOk()){
+    floatText(W * 0.5, H * 0.4, 'ADS UNAVAILABLE', COL.mute, 14);
+    return;
+  }
+  cgRewarded(function(){
+    if(reviveUsed || state !== 'over') return;
+    reviveUsed = true;
+    revivePlayer();
+  });
+}
+function revivePlayer(){
+  state = 'playing';
+  gameFinished = false;
+  finishingFlow = false;
+  rewardClaimed = false;
+  deathT = 0;
+  deathCause = '';
+  deathTip = '';
+  player.alive = true;
+  player.dashing = false;
+  player.cd = 0;
+  player.invuln = 2.2;
+  player.hits = 0;
+  var clearR = 160;
+  for(var i=enemies.length-1;i>=0;i--){
+    if(dist2(enemies[i].x, enemies[i].y, player.x, player.y) < clearR*clearR) enemies.splice(i,1);
+  }
+  for(var j=projectiles.length-1;j>=0;j--){
+    if(dist2(projectiles[j].x, projectiles[j].y, player.x, player.y) < clearR*clearR) projectiles.splice(j,1);
+  }
+  ring(player.x, player.y, COL.cyan, 10, 120, 0.4);
+  floatText(player.x, player.y - 40, 'REVIVE', COL.cyan, 18);
+  canvas.style.cursor = 'none';
+  cgGameplayStart();
+  SFX.start();
+}
+function claimRewardedCoins(){ claimDoubleCoins(); }
+function tryHitShop(x, y){
+  for(var i=0;i<shopBtns.length;i++){
+    var b = shopBtns[i];
+    if(hitBtn(b, x, y)){ tryBuyUpgrade(b.id); return true; }
+  }
+  return false;
+}
+
+function initDust(){
+  dust.length = 0;
+  var n = Math.min(48, Math.max(24, Math.floor((W * H) / 28000)));
+  for(var i=0;i<n;i++){
+    dust.push({
+      x: rand(0, W),
+      y: rand(0, H),
+      z: (i < n * 0.5) ? 0.3 : 0.7,
+      size: rand(0.8, 1.5)
+    });
+  }
+}
+
+var timeScale = TIME_IDLE;
+var score = 0, combo = 0, bestCombo = 0, kills = 0;
+var comboFlash = 0;
+var comboTimer = 0;
+var comboPulse = 0;
+
+// `elapsed` counts world time, not wall-clock time. Since idling slows the world
+// to a crawl it also slows wave progression, so standing still is a real tactical
+// choice rather than a way to farm the clock. It's also what "time survived"
+// reports, which keeps the number consistent with the wave you died on.
+var elapsed = 0, wave = 1, spawnTimer = 0, waveBanner = 0;
+
+var highScore = 0;
+var tutorialSeen = false;
+// Progress loaded after CrazyGames init (or immediately if offline).
+
+var tutorial = {
+  active: false,
+  step: 0,       // 0 hold still, 1 dash kill, 2 done flash
+  timer: 0,
+  idleAcc: 0,
+  prompt: ''
+};
+var deathCause = '';
+var deathTip = '';
+var cam = { x:0, y:0 };
+
+// Post-process intensities. Everything drains toward zero every frame and gets
+// topped up by whatever just happened, so effects stack during a combo instead of
+// re-triggering from scratch.
+var shake = { mag:0, rot:0 };
+var aber = 0;
+var invert = 0;
+var tickAcc = 0;
+var globalT = 0;
+var deathT = 0;
+
+function resetGame(){
+  player = {
+    x: W*0.5, y: H*0.5,
+    px: W*0.5, py: H*0.5,
+    dashing: false, dashT: 0, cd: 0, invuln: 0,
+    sx:0, sy:0, ex:0, ey:0,
+    ang: 0, hits: 0, alive: true, spin: 0,
+    nearMiss: false, chainWindow: 0
+  };
+  enemies.length = 0; projectiles.length = 0; shards.length = 0;
+  trails.length = 0; pops.length = 0; floaters.length = 0;
+  coins.length = 0;
+  runCoins = 0; magnetT = 0; runCoinBanked = false;
+  gameFinished = false;
+  rewardClaimed = false;
+  reviveUsed = false;
+  overSettled = false;
+  finishingFlow = false;
+  timeScale = TIME_IDLE;
+  score = 0; combo = 0; bestCombo = 0; kills = 0; comboFlash = 0;
+  comboTimer = 0; comboPulse = 0;
+  elapsed = 0; wave = 1; spawnTimer = 0.4; waveBanner = 0;
+  goalBanner = 3.2;
+  shake.mag = 0; shake.rot = 0; aber = 0; invert = 0; deathT = 0;
+  paused = false;
+  deathCause = ''; deathTip = '';
+  cam.x = 0; cam.y = 0;
+
+  if(!tutorialSeen){
+    beginTutorial();
+  } else {
+    tutorial.active = false;
+    tutorial.step = 0;
+    tutorial.prompt = '';
+    for(var i=0;i<3;i++) spawnEnemy('stalker');
+  }
+}
+
+// Side count + color identity: stalkers are crimson chase, gunners amber range,
+// phantoms violet darting threats. Shape alone used to be the only cue.
+var ENEMY = {
+  stalker: { r:13, speed:104, accel:5.5,  sides:3, score:100, hp:1, col: COL.red,    fill:'rgba(232,69,60,0.16)',   inner:'rgba(255,170,160,0.85)' },
+  gunner:  { r:14, speed:76,  accel:4.0,  sides:4, score:150, hp:1, col: COL.amber,  fill:'rgba(232,184,109,0.16)', inner:'rgba(255,230,180,0.85)' },
+  phantom: { r:11, speed:212, accel:8.5,  sides:5, score:200, hp:1, col: COL.violet, fill:'rgba(154,143,212,0.16)', inner:'rgba(210,200,255,0.85)' }
+};
+
+function beginTutorial(){
+  tutorial.active = true;
+  tutorial.step = 0;
+  tutorial.timer = 0;
+  tutorial.idleAcc = 0;
+  tutorial.prompt = isTouchUI() ? 'HOLD STILL — TIME FREEZES' : 'STAND STILL — TIME HOLDS';
+  enemies.length = 0;
+  projectiles.length = 0;
+  spawnEnemy('stalker', W * 0.72, H * 0.38);
+  spawnTimer = 99;
+}
+
+function completeTutorial(){
+  tutorial.active = false;
+  tutorial.step = 2;
+  tutorial.prompt = '';
+  tutorialSeen = true;
+  try { storeSet(TUT_KEY, '1'); } catch(e){}
+  waveBanner = 1.6;
+  goalBanner = 3.5;
+  spawnTimer = 0.8;
+  for(var i=0;i<2;i++) spawnEnemy('stalker');
+  floatText(player.x, player.y - 50, 'GO', COL.cyan, 18);
+}
+
+function skipTutorial(){
+  if(!tutorial.active) return;
+  completeTutorial();
+  floatText(player.x, player.y - 70, 'SKIPPED', COL.mute, 14);
+}
+
+function tipForDeath(cause){
+  if(cause === 'projectile') return 'Slice orbs mid-dash — they hang in slow-mo.';
+  if(cause === 'gunner') return 'Close the gap before the amber charge completes.';
+  if(cause === 'phantom') return 'Phantoms punish standing still. Keep blinking.';
+  if(cause === 'stalker') return 'Stop to plan, then commit through the pack.';
+  if(cause === 'whiff') return 'Empty dash = 1.2s lockout. Near-miss softens it.';
+  return 'Time only flows when you move. Plan in the freeze.';
+}
+
+// Spawn beyond the edge so enemies walk into frame instead of popping into
+// existence on top of the player.
+function edgeSpawnPoint(){
+  var m = 60;
+  var side = randInt(0,3);
+  if(side===0) return { x: rand(-m, W+m), y: -m };
+  if(side===1) return { x: W+m,           y: rand(-m, H+m) };
+  if(side===2) return { x: rand(-m, W+m), y: H+m };
+  return           { x: -m,               y: rand(-m, H+m) };
+}
+
+function pickEnemyType(){
+  var r = Math.random();
+  if(wave <= 1)      return r < 0.88 ? 'stalker' : 'gunner';
+  if(wave <= 2)      return r < 0.55 ? 'stalker' : (r < 0.88 ? 'gunner' : 'phantom');
+  if(wave <= 4)      return r < 0.40 ? 'stalker' : (r < 0.72 ? 'gunner' : 'phantom');
+  return               r < 0.30 ? 'stalker' : (r < 0.58 ? 'gunner' : 'phantom');
+}
+
+// Scripted opening compositions — pressure kinds, not just body count.
+function waveComposition(w){
+  if(w === 1) return ['stalker','stalker','stalker'];
+  if(w === 2) return ['stalker','stalker','gunner','stalker'];
+  if(w === 3) return ['stalker','gunner','phantom','stalker'];
+  if(w === 4) return ['gunner','gunner','phantom','stalker','stalker'];
+  if(w === 5) return ['phantom','phantom','gunner','stalker','gunner','stalker'];
+  if(w === 6) return ['gunner','phantom','stalker','gunner','phantom','stalker','stalker'];
+  var n = Math.min(10, 4 + Math.floor(w/2));
+  var list = [];
+  for(var i=0;i<n;i++) list.push(pickEnemyType());
+  return list;
+}
+
+function spawnEnemy(type, sx, sy){
+  if(!type) type = pickEnemyType();
+  var d = ENEMY[type];
+  var p = (sx != null && sy != null) ? { x:sx, y:sy } : edgeSpawnPoint();
+  var sp = d.speed * (1 + (wave-1)*0.045);
+  enemies.push({
+    type: type, x: p.x, y: p.y, vx:0, vy:0,
+    r: d.r, maxSpeed: sp, accel: d.accel, sides: d.sides,
+    score: d.score, hp: d.hp,
+    col: d.col, fill: d.fill, inner: d.inner,
+    ang: rand(0, Math.PI*2), spin: rand(-1.6, 1.6),
+    fire: type==='gunner' ? rand(1.1, 2.2) : 99,
+    phase: rand(0, Math.PI*2),
+    born: 0, orbit: Math.random() < 0.5 ? 1 : -1,
+    telegraph: 0, charged: false
+  });
+  if(state === 'playing') SFX.spawn();
+}
+
+function seedTitleAmbient(){
+  enemies.length = 0;
+  projectiles.length = 0;
+  var mix = ['stalker','stalker','gunner','phantom','stalker','gunner','phantom','stalker'];
+  for(var i=0;i<mix.length;i++){
+    var d = ENEMY[mix[i]];
+    var ang = rand(0, Math.PI*2);
+    var sp = d.speed * rand(0.7, 1.15);
+    var band = rand(0, 4);
+    var mx = Math.max(48, W * 0.16), my = Math.max(48, H * 0.16);
+    var sx, sy;
+    if(band < 1){ sx = rand(20, W-20); sy = rand(16, my); }
+    else if(band < 2){ sx = rand(20, W-20); sy = rand(H-my, H-16); }
+    else if(band < 3){ sx = rand(16, mx); sy = rand(20, H-20); }
+    else { sx = rand(W-mx, W-16); sy = rand(20, H-20); }
+    enemies.push({
+      type: mix[i],
+      x: sx, y: sy,
+      vx: Math.cos(ang)*sp, vy: Math.sin(ang)*sp,
+      r: d.r, maxSpeed: sp, accel: d.accel, sides: d.sides,
+      score: d.score, hp: d.hp,
+      col: d.col, fill: d.fill, inner: d.inner,
+      ang: rand(0, Math.PI*2), spin: rand(-1.1, 1.1),
+      fire: 99, phase: rand(0, Math.PI*2),
+      born: 1, orbit: Math.random() < 0.5 ? 1 : -1,
+      telegraph: 0, charged: false
+    });
+  }
+}
+
+function updateTitleAmbient(dt){
+  timeScale = TIME_IDLE;
+  var wdt = dt * TIME_IDLE;
+  if(!enemies.length) seedTitleAmbient();
+  var cx = W * 0.5, cy = H * 0.5;
+  var keep = Math.max(140, Math.min(W, H) * 0.34);
+  for(var i=0;i<enemies.length;i++){
+    var e = enemies[i];
+    e.born = 1;
+    e.ang += e.spin * wdt;
+    e.phase += wdt * (e.type==='phantom' ? 11 : 3.2);
+    var turn = Math.sin(titleT * 0.28 + i * 1.7) * 0.55;
+    var c = Math.cos(turn * dt), s = Math.sin(turn * dt);
+    var nvx = e.vx * c - e.vy * s;
+    var nvy = e.vx * s + e.vy * c;
+    e.vx = nvx; e.vy = nvy;
+    var dx = e.x - cx, dy = e.y - cy;
+    var d = len(dx, dy) || 1;
+    if(d < keep){
+      e.vx += (dx / d) * 90;
+      e.vy += (dy / d) * 90;
+    }
+    var spd = len(e.vx, e.vy) || e.maxSpeed;
+    if(spd > 1e-3){
+      e.vx = (e.vx / spd) * e.maxSpeed;
+      e.vy = (e.vy / spd) * e.maxSpeed;
+    }
+    e.x += e.vx * wdt;
+    e.y += e.vy * wdt;
+    var m = 48;
+    if(e.x < -m) e.x = W + m;
+    if(e.x > W + m) e.x = -m;
+    if(e.y < -m) e.y = H + m;
+    if(e.y > H + m) e.y = -m;
+  }
+}
+
+function spawnProjectile(e){
+  var d = norm(player.x - e.x, player.y - e.y);
+  projectiles.push({
+    x: e.x + d.x*e.r*1.4, y: e.y + d.y*e.r*1.4,
+    vx: d.x*PROJ_SPEED, vy: d.y*PROJ_SPEED,
+    r: PROJ_R, life: 8, phase: rand(0,6.28)
+  });
+  SFX.shoot();
+}
+
+// Break a dead thing into triangles flung outward from the point of death. The
+// shards carry no gameplay meaning at all; they exist so a kill reads as violent
+// rather than as an object quietly disappearing.
+function shatter(x, y, sides, radius, tint){
+  // Cap debris so long chains don't stack hundreds of glowing polys.
+  if(shards.length > 90) shards.splice(0, shards.length - 70);
+  var n = randInt(5, 8);
+  for(var i=0;i<n;i++){
+    var a = (i/n)*Math.PI*2 + rand(-0.3,0.3);
+    var sp = rand(110, 300);
+    shards.push({
+      x: x + Math.cos(a)*rand(0,radius*0.5),
+      y: y + Math.sin(a)*rand(0,radius*0.5),
+      vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
+      size: rand(radius*0.22, radius*0.55),
+      ang: rand(0,Math.PI*2), spin: rand(-9,9),
+      life: rand(0.28,0.55), max: 0,
+      col: tint || COL.red
+    });
+    shards[shards.length-1].max = shards[shards.length-1].life;
+  }
+}
+
+function ring(x,y,col,r0,r1,life){
+  pops.push({ x:x, y:y, r:r0, r1:r1, life:life, max:life, col:col });
+}
+
+function floatText(x,y,txt,col,size){
+  floaters.push({ x:x, y:y, txt:txt, col:col, size:size||16, life:0.85, max:0.85, vy:-46 });
+}
+
+// Shake accumulates so a five-kill chain hits harder than five separate kills,
+// but the ceilings matter: past roughly this much rotation the arena becomes
+// genuinely unreadable and you die to something you never saw.
+function addShake(mag, rot){
+  shake.mag = Math.min(18, shake.mag + mag);
+  shake.rot = Math.min(0.028, shake.rot + (rot||mag*0.00055));
+}
+
+function updateAim(dtReal){
+  if(usingTouch){
+    if(aimTouch){
+      var dx = aimTouch.x - aimTouch.sx, dy = aimTouch.y - aimTouch.sy;
+      if(len(dx,dy) > 8){
+        var n = norm(dx,dy);
+        var dd = effectiveDashDist();
+        aim.x = player.x + n.x * dd;
+        aim.y = player.y + n.y * dd;
+        aim.angle = Math.atan2(n.y, n.x);
+        rawMouse.x = aim.x;
+        rawMouse.y = aim.y;
+      }
+    }
+    // While only the move stick is down, leave aim.angle alone — do not chase
+    // rawMouse (which used to sit under the MOVE thumb).
+    reticleSpread += (0 - reticleSpread) * (1 - Math.exp(-15 * dtReal));
+    return;
+  }
+
+  var smoothFactor = 1 - Math.exp(-22 * dtReal);
+  aim.x += (rawMouse.x - aim.x) * smoothFactor;
+  aim.y += (rawMouse.y - aim.y) * smoothFactor;
+  aim.angle = Math.atan2(aim.y - player.y, aim.x - player.x);
+  
+  // Reticle spread calculation (expands when mouse moves relative to aim)
+  var ddx = rawMouse.x - aim.x;
+  var ddy = rawMouse.y - aim.y;
+  var spreadTarget = Math.min(30, len(ddx, ddy) * 0.5);
+  reticleSpread += (spreadTarget - reticleSpread) * (1 - Math.exp(-15 * dtReal));
+}
+
+function tryDash(){
+  if(!player.alive || player.dashing || player.cd > 0) return;
+  player.dashing = true;
+  player.dashT = 0;
+  player.hits = 0;
+  player.nearMiss = false;
+  player.sx = player.x; player.sy = player.y;
+  var ddx = Math.cos(aim.angle);
+  var ddy = Math.sin(aim.angle);
+  var dd = usingTouch ? effectiveDashDist() : dashDist();
+  var tx = player.x + ddx * dd;
+  var ty = player.y + ddy * dd;
+  // Clamping the destination rather than cancelling the dash means aiming into a
+  // wall still gets you a shortened lunge that can still kill, instead of eating
+  // your input and leaving you standing there.
+  var pad = PLAYER_R + 4;
+  player.ex = clamp(tx, pad, W - pad);
+  player.ey = clamp(ty, pad, H - pad);
+  player.invuln = DASH_TIME + DASH_GRACE;
+  trails.push({
+    x0: player.sx, y0: player.sy, x1: player.sx, y1: player.sy,
+    life: 0.55, max: 0.55, live: true, w: 5
+  });
+  addShake(3, 0.004);
+  SFX.dash();
+}
+
+function spawnCoins(x, y, type){
+  var n = type === 'phantom' ? randInt(2, 3) : (type === 'gunner' ? randInt(1, 2) : 1);
+  for(var i=0;i<n;i++){
+    var a = rand(0, Math.PI*2);
+    var sp = rand(40, 110);
+    coins.push({
+      x: x + Math.cos(a)*rand(4, 16),
+      y: y + Math.sin(a)*rand(4, 16),
+      vx: Math.cos(a)*sp,
+      vy: Math.sin(a)*sp,
+      r: 5.5,
+      life: 8,
+      born: 0,
+      value: 1
+    });
+  }
+}
+
+function collectCoin(c, idx){
+  runCoins += c.value;
+  floatText(c.x, c.y - 10, '+' + c.value, COL.amber, 13);
+  SFX.coin();
+  ring(c.x, c.y, COL.amber, 3, 22, 0.18);
+  if(combo > 0){
+    comboTimer = Math.min(
+      comboTimer + 0.18,
+      COMBO_TIME + Math.min(2.4, combo * 0.1)
+    );
+  }
+  coins.splice(idx, 1);
+}
+
+function updateCoins(dt, wdt){
+  if(magnetT > 0) magnetT = Math.max(0, magnetT - dt);
+  var pull = magnetT > 0;
+  var mr = magnetRadius();
+  var mr2 = mr * mr;
+  for(var i=coins.length-1;i>=0;i--){
+    var c = coins[i];
+    c.born += dt;
+    c.life -= dt;
+    if(c.life <= 0){ coins.splice(i,1); continue; }
+    if(pull && player && player.alive){
+      var ddx = player.x - c.x, ddy = player.y - c.y;
+      var d2 = ddx*ddx + ddy*ddy;
+      if(d2 < mr2 && d2 > 1){
+        var d = Math.sqrt(d2);
+        var str = (1 - d/mr) * 520;
+        c.vx += (ddx/d) * str * dt;
+        c.vy += (ddy/d) * str * dt;
+      }
+    }
+    c.vx *= Math.pow(0.08, dt);
+    c.vy *= Math.pow(0.08, dt);
+    c.x += c.vx * Math.max(wdt, dt * 0.55);
+    c.y += c.vy * Math.max(wdt, dt * 0.55);
+    c.x = clamp(c.x, 10, W-10);
+    c.y = clamp(c.y, 10, H-10);
+    if(player && player.alive && dist2(c.x,c.y,player.x,player.y) < (c.r + PLAYER_R + 6)*(c.r + PLAYER_R + 6)){
+      collectCoin(c, i);
+    }
+  }
+}
+
+function sliceSweep(ax, ay, bx, by){
+  var hit = 0;
+  for(var i=enemies.length-1;i>=0;i--){
+    var e = enemies[i];
+    if(segCircle(ax,ay,bx,by, e.x,e.y, e.r + SLICE_PAD)){
+      var tint = e.col || COL.red;
+      var etype = e.type;
+      enemies.splice(i,1);
+      shatter(e.x, e.y, e.sides, e.r, tint);
+      ring(e.x, e.y, tint, e.r*0.7, e.r*4.2, 0.35);
+      spawnCoins(e.x, e.y, etype);
+      hit++;
+      kills++;
+      var gain = Math.round(e.score * Math.max(1, combo + hit));
+      score += gain;
+      floatText(e.x, e.y - e.r - 8, '+' + gain, COL.white, 15);
+      SFX.slice(combo + hit);
+      if(tutorial.active && tutorial.step === 1){
+        tutorial.step = 2;
+        tutorial.timer = 0;
+        tutorial.prompt = 'KEEP CUTTING — DASH REFUNDS';
+      }
+    } else if(segCircle(ax,ay,bx,by, e.x,e.y, e.r + NEAR_MISS_PAD)){
+      player.nearMiss = true;
+    }
+  }
+  for(var j=projectiles.length-1;j>=0;j--){
+    var p = projectiles[j];
+    if(segCircle(ax,ay,bx,by, p.x,p.y, p.r + 9)){
+      projectiles.splice(j,1);
+      shatter(p.x, p.y, 3, p.r*1.5, COL.red);
+      ring(p.x, p.y, COL.red, 2, p.r*3.2, 0.22);
+      score += 25;
+      SFX.pop();
+    }
+  }
+  if(hit > 0){
+    player.hits += hit;
+    addShake(6 + hit*4, 0.006 + hit*0.003);
+  }
+  return hit;
+}
+
+function breakCombo(reason){
+  if(combo <= 0){ combo = 0; comboTimer = 0; return; }
+  var was = combo;
+  combo = 0;
+  comboTimer = 0;
+  comboFlash = 0;
+  comboPulse = 0;
+  if(was >= 2){
+    floatText(player.x, player.y - 36, 'COMBO BREAK', COL.red, 16);
+    SFX.comboBreak();
+    addShake(3 + was * 0.35, 0.003);
+  }
+}
+
+function triggerComboFx(n, multiHit){
+  comboFlash = 1;
+  comboPulse = Math.min(1, 0.4 + Math.min(0.55, n * 0.04));
+  // Prefer local rings + HUD punch over full-screen RGB split (that path is the lag).
+  if(n >= 2 && n < 15){
+    ring(player.x, player.y, COL.cyan, 8, 50 + Math.min(n, 14) * 6, 0.22);
+    addShake(3 + Math.min(n, 12) * 0.25 + (multiHit ? 2 : 0), 0.003);
+  }
+  if(n >= 5 && n < 15){
+    ring(player.x, player.y, COL.amber, 10, 90 + n * 6, 0.28);
+    aber = Math.min(0.3, aber + 0.14);
+  }
+  if(n === 8){
+    ring(player.x, player.y, COL.white, 8, 140, 0.32);
+    invert = Math.min(0.28, invert + 0.16);
+    floatText(player.x, player.y - 52, 'OVERDRIVE', COL.white, 18);
+  }
+  if(n === 12){
+    ring(player.x, player.y, COL.amber, 6, 200, 0.34);
+    floatText(player.x, player.y - 52, 'SINGULARITY', COL.amber, 18);
+  }
+  // Milestone bursts — rare enough to stay flashy without melting the framerate.
+  if(n === 15){
+    ring(player.x, player.y, COL.cyan, 10, 160, 0.4);
+    ring(player.x, player.y, COL.amber, 20, 220, 0.35);
+    floatText(player.x, player.y - 56, '15× RAMPAGE', COL.amber, 22);
+    addShake(9, 0.012);
+    aber = Math.min(0.4, aber + 0.22);
+  }
+  if(n === 25){
+    ring(player.x, player.y, COL.white, 8, 200, 0.45);
+    ring(player.x, player.y, COL.cyan, 18, 280, 0.4);
+    ring(player.x, player.y, COL.violet, 28, 320, 0.32);
+    floatText(player.x, player.y - 60, '25× CHRONO LOCK', COL.white, 24);
+    addShake(11, 0.016);
+    aber = Math.min(0.5, aber + 0.28);
+    invert = Math.min(0.4, invert + 0.25);
+    cgHappyTime();
+  }
+  if(n === 50){
+    ring(player.x, player.y, COL.amber, 6, 240, 0.5);
+    ring(player.x, player.y, COL.red, 14, 300, 0.42);
+    ring(player.x, player.y, COL.cyan, 24, 360, 0.38);
+    floatText(player.x, player.y - 64, '50× TIME FRACTURE', COL.amber, 26);
+    addShake(13, 0.02);
+    aber = Math.min(0.55, aber + 0.32);
+    invert = Math.min(0.5, invert + 0.3);
+    SFX.comboUp(20);
+  }
+  if(n === 100){
+    ring(player.x, player.y, COL.white, 4, 280, 0.55);
+    ring(player.x, player.y, COL.cyan, 12, 340, 0.5);
+    ring(player.x, player.y, COL.amber, 22, 400, 0.45);
+    ring(player.x, player.y, COL.red, 34, 460, 0.4);
+    floatText(player.x, player.y - 70, '100× ETERNAL', COL.white, 28);
+    addShake(16, 0.024);
+    aber = Math.min(0.65, aber + 0.4);
+    invert = Math.min(0.55, invert + 0.35);
+    SFX.comboUp(24);
+  }
+}
+
+function endDash(){
+  player.dashing = false;
+  for(var i=0;i<trails.length;i++){ if(trails[i].live) trails[i].live = false; }
+  if(player.hits > 0){
+    combo += 1;
+    if(combo > bestCombo) bestCombo = combo;
+    // Slightly longer leash at higher chains so big runs aren't brittle.
+    comboTimer = COMBO_TIME + Math.min(2.4, combo * 0.1);
+    player.cd = 0;
+    player.chainWindow = CHAIN_WINDOW;
+    magnetT = Math.max(magnetT, magnetDuration());
+    SFX.comboUp(combo);
+    triggerComboFx(combo, player.hits >= 2);
+    if(combo >= 3 && combo !== 15 && combo !== 25 && combo !== 50 && combo !== 100){
+      var cCol = combo >= 12 ? COL.amber : (combo >= 8 ? COL.white : (combo >= 5 ? COL.amber : COL.cyan));
+      floatText(player.x, player.y - 34, combo + '×', cCol, 16 + Math.min(10, combo * 0.4));
+    }
+  } else if(player.nearMiss){
+    // Near-miss: soft CD, but the chain still bleeds time instead of hard break.
+    player.cd = dashCd() * 0.45;
+    comboTimer = Math.max(0, comboTimer - 0.55);
+    floatText(player.x, player.y - 28, 'NEAR MISS', COL.amber, 14);
+    SFX.nearMiss();
+    if(combo > 0 && comboTimer <= 0) breakCombo('near');
+  } else {
+    player.cd = (player.chainWindow > 0) ? dashCd() * 0.38 : dashCd();
+    SFX.whiff();
+    breakCombo('whiff');
+  }
+}
+
+// There are two clocks in this function and keeping them straight is the whole
+// trick. `dt` is real time and drives anything the player controls, so the
+// character never feels sluggish no matter how frozen the world looks. `wdt` is
+// dt scaled by timeScale and drives everything else. Holding a movement key winds
+// the world back up to full speed, which is the bargain the game is built on:
+// you cannot advance time without exposing yourself to it.
+function update(dt){
+  globalT += dt;
+
+  // Fire queued blink before aim smoothing so a touch-release heading is not
+  // overwritten on the same frame.
+  if(dashRequest){ tryDash(); dashRequest = false; }
+  updateAim(dt);
+
+  // Holding right-click re-dashes the moment the blade comes back up. It reads as
+  // a held attack and tryDash rejects the calls that arrive too early.
+  if(mouse.right) tryDash();
+
+  var mv = moveVector();
+  var moving = (mv.x !== 0 || mv.y !== 0);
+
+  var target = (moving || player.dashing) ? TIME_ACTIVE : TIME_IDLE;
+  timeScale = lerp(timeScale, target, Math.min(1, dt * TIME_LERP));
+
+  var wdt = dt * timeScale;
+  elapsed += wdt;
+
+  if(timeScale < 0.4 && player.alive){
+    tickAcc += dt;
+    if(tickAcc > 0.34){ tickAcc = 0; SFX.tick(); }
+  } else tickAcc = 0;
+
+  // Previous position is kept because the slice test needs the segment travelled,
+  // not just where we ended up.
+  player.px = player.x; player.py = player.y;
+
+  if(player.dashing){
+    // Real dt again: a dash lasts 115ms of wall-clock time regardless of how slow
+    // the world is, which is why it feels like a snap rather than a glide.
+    player.dashT += dt;
+    var t = clamp(player.dashT / DASH_TIME, 0, 1);
+    // Front-loaded easing. Most of the distance is covered in the first few
+    // frames so the movement lands with a punch and settles, instead of coasting.
+    var e2 = 1 - Math.pow(1 - t, 2.4);
+    var nx = lerp(player.sx, player.ex, e2);
+    var ny = lerp(player.sy, player.ey, e2);
+    sliceSweep(player.px, player.py, nx, ny);
+    player.x = nx; player.y = ny;
+    for(var ti=0; ti<trails.length; ti++){
+      if(trails[ti].live){ trails[ti].x1 = nx; trails[ti].y1 = ny; }
+    }
+    player.ang = Math.atan2(player.ey - player.sy, player.ex - player.sx);
+    if(t >= 1) endDash();
+  } else if(player.alive){
+    player.x = clamp(player.x + mv.x * PLAYER_SPEED * dt, PLAYER_R, W - PLAYER_R);
+    player.y = clamp(player.y + mv.y * PLAYER_SPEED * dt, PLAYER_R, H - PLAYER_R);
+    player.ang = aim.angle;
+  }
+  player.spin += dt * (2.2 + timeScale*5);
+  if(player.cd > 0) player.cd = Math.max(0, player.cd - dt);
+  if(player.invuln > 0) player.invuln = Math.max(0, player.invuln - dt);
+  if(comboFlash > 0) comboFlash = Math.max(0, comboFlash - dt * 2.8);
+  if(comboPulse > 0) comboPulse = Math.max(0, comboPulse - dt * 1.4);
+  if(player.chainWindow > 0) player.chainWindow = Math.max(0, player.chainWindow - dt);
+  // Combo leash runs on real time — hanging in slow-mo still burns the clock.
+  if(combo > 0){
+    comboTimer -= dt;
+    if(comboTimer <= 0) breakCombo('timeout');
+  }
+  // No sustained chromatic simmer — that kept the triple-canvas path running every frame.
+
+  // Soft look-ahead toward aim so the arena feels directed, not locked to center.
+  var lookAmt = player.dashing ? 28 : 16;
+  cam.x = lerp(cam.x, Math.cos(aim.angle) * lookAmt, Math.min(1, dt * 6));
+  cam.y = lerp(cam.y, Math.sin(aim.angle) * lookAmt, Math.min(1, dt * 6));
+
+  // ---- Tutorial gate ----
+  if(tutorial.active){
+    tutorial.timer += dt;
+    if(tutorial.step === 0){
+      if(!moving && !player.dashing) tutorial.idleAcc += dt;
+      else tutorial.idleAcc = Math.max(0, tutorial.idleAcc - dt * 2);
+      if(tutorial.idleAcc > 0.7){
+        tutorial.step = 1;
+        tutorial.prompt = isTouchUI() ? 'DRAG & RELEASE — CUT THROUGH IT' : 'SPACE OR RMB — CUT THROUGH IT';
+        tutorial.timer = 0;
+      }
+      // Keep exactly one tutor stalker alive and slow.
+      if(enemies.length === 0) spawnEnemy('stalker', W*0.72, H*0.4);
+    } else if(tutorial.step === 1){
+      if(enemies.length === 0) spawnEnemy('stalker', W*0.7, H*0.42);
+    } else if(tutorial.step === 2){
+      if(tutorial.timer > 1.4) completeTutorial();
+    }
+    spawnTimer = 99;
+  } else {
+    var newWave = 1 + Math.floor(elapsed / WAVE_INTERVAL);
+    if(newWave !== wave){
+      wave = newWave;
+      waveBanner = 1.35;
+      SFX.wave();
+      addShake(5, 0.004);
+      var burst = waveComposition(wave);
+      for(var b=0;b<burst.length;b++) spawnEnemy(burst[b]);
+    }
+    if(waveBanner > 0) waveBanner = Math.max(0, waveBanner - dt);
+
+    var interval = Math.max(0.28, 1.05 - (wave-1)*0.11);
+    var cap = Math.min(46, 7 + (wave-1)*3.4);
+    // Sparse field = don't crawl. Mix in a little real-time so idle planning
+    // doesn't leave the arena empty for ages between packs.
+    var spawnDt = (enemies.length < 3) ? Math.max(wdt, dt * 0.55) : wdt;
+    spawnTimer -= spawnDt;
+    if(spawnTimer <= 0){
+      spawnTimer = interval * rand(0.65, 1.05);
+      if(enemies.length < 3) spawnTimer *= 0.55;
+      if(enemies.length < cap) spawnEnemy();
+    }
+  }
+
+  for(var i=0;i<enemies.length;i++){
+    var e = enemies[i];
+    e.born += wdt;
+    e.ang += e.spin * wdt;
+    e.phase += wdt * (e.type==='phantom' ? 11 : 3.2);
+
+    var dx = player.x - e.x, dy = player.y - e.y;
+    var d = len(dx,dy) || 1;
+    var ux = dx/d, uy = dy/d;
+    var tvx = 0, tvy = 0;
+
+    // Each type only decides on a *desired* velocity; the shared code below eases
+    // actual velocity toward it. That's what gives them weight and makes them
+    // overshoot when you sidestep, which is where the openings come from.
+    if(e.type === 'stalker'){
+      var stalkSp = tutorial.active ? e.maxSpeed * 0.45 : e.maxSpeed;
+      tvx = ux * stalkSp; tvy = uy * stalkSp;
+    } else if(e.type === 'gunner'){
+      var want = 300;
+      var radial = clamp((d - want) / 130, -1, 1);
+      var tx2 = -uy * e.orbit, ty2 = ux * e.orbit;
+      tvx = (ux * radial * 0.95 + tx2 * 0.65) * e.maxSpeed;
+      tvy = (uy * radial * 0.95 + ty2 * 0.65) * e.maxSpeed;
+      e.fire -= wdt;
+      var ch = clamp(1 - e.fire/1.4, 0, 1);
+      e.telegraph = ch;
+      if(ch > 0.72 && !e.charged){
+        e.charged = true;
+        SFX.charge();
+      }
+      if(e.fire <= 0 && d < 900){
+        e.fire = rand(1.5, 2.6) / (1 + (wave-1)*0.07);
+        e.charged = false;
+        e.telegraph = 0;
+        spawnProjectile(e);
+      }
+    } else {
+      var wob = Math.sin(e.born*4.4 + e.phase) * 0.75;
+      var px2 = ux * Math.cos(wob) - uy * Math.sin(wob);
+      var py2 = ux * Math.sin(wob) + uy * Math.cos(wob);
+      var pulse = 0.72 + 0.55 * (0.5 + 0.5*Math.sin(e.born*7.5));
+      // Telegraph peaks right before a phantom lunge.
+      e.telegraph = clamp((pulse - 0.9) / 0.37, 0, 1);
+      if(e.telegraph > 0.85 && !e.charged){
+        e.charged = true;
+        SFX.phase();
+      }
+      if(e.telegraph < 0.2) e.charged = false;
+      tvx = px2 * e.maxSpeed * pulse; tvy = py2 * e.maxSpeed * pulse;
+    }
+
+    // Clamped because at very low frame rates accel*wdt can exceed 1, which would
+    // overshoot the target velocity and oscillate.
+    var k = Math.min(1, e.accel * wdt);
+    e.vx = lerp(e.vx, tvx, k);
+    e.vy = lerp(e.vy, tvy, k);
+    e.x += e.vx * wdt;
+    e.y += e.vy * wdt;
+
+    // Shove overlapping enemies apart. Without this a dozen stalkers converge into
+    // a single stack that looks like one enemy and dies to one dash: visually
+    // confusing and far too generous. O(n^2), which is fine against the cap above.
+    for(var j=i+1;j<enemies.length;j++){
+      var o = enemies[j];
+      var sdx = o.x - e.x, sdy = o.y - e.y;
+      var sd2 = sdx*sdx + sdy*sdy;
+      var minD = e.r + o.r + 6;
+      if(sd2 > 0.01 && sd2 < minD*minD){
+        var sd = Math.sqrt(sd2);
+        var push = (minD - sd) * 0.5;
+        var pnx = sdx/sd, pny = sdy/sd;
+        e.x -= pnx*push; e.y -= pny*push;
+        o.x += pnx*push; o.y += pny*push;
+      }
+    }
+
+    // Keep combat on the playfield — no wandering into the letterbox.
+    if(e.born > 0.55){
+      var padE = e.r + 2;
+      e.x = clamp(e.x, padE, Math.max(padE, W - padE));
+      e.y = clamp(e.y, padE, Math.max(padE, H - padE));
+    }
+
+    // One touch kills. The invulnerability check is what makes dashing *through* a
+    // crowd the intended move rather than suicide.
+    if(player.alive && player.invuln <= 0 &&
+       dist2(e.x,e.y,player.x,player.y) < (e.r + PLAYER_R)*(e.r + PLAYER_R)){
+      killPlayer(e.type);
+    }
+  }
+
+  // Orbs move on world time, so they hang in the air while you're still and only
+  // become dangerous once you commit to moving. That's the mechanic in miniature.
+  for(var p=projectiles.length-1;p>=0;p--){
+    var pr = projectiles[p];
+    pr.x += pr.vx * wdt;
+    pr.y += pr.vy * wdt;
+    pr.life -= wdt;
+    pr.phase += wdt*6;
+    if(pr.life <= 0 || pr.x < -60 || pr.x > W+60 || pr.y < -60 || pr.y > H+60){
+      projectiles.splice(p,1); continue;
+    }
+    if(player.alive && player.invuln <= 0 &&
+       dist2(pr.x,pr.y,player.x,player.y) < (pr.r + PLAYER_R)*(pr.r + PLAYER_R)){
+      killPlayer('projectile');
+    }
+  }
+
+  // Debris runs on its own clock, mostly real. On strict world time a kill made
+  // while standing still would leave the shards hanging as a frozen cloud for ten
+  // seconds; on pure real time they'd vanish before you noticed them. This splits
+  // the difference so the explosion still reads as slow-motion but resolves.
+  var sdt = dt * lerp(0.35, 1, timeScale);
+  for(var s=shards.length-1;s>=0;s--){
+    var sh = shards[s];
+    sh.x += sh.vx * sdt; sh.y += sh.vy * sdt;
+    sh.vx *= (1 - 2.1*sdt); sh.vy *= (1 - 2.1*sdt);
+    sh.ang += sh.spin * sdt;
+    sh.life -= sdt;
+    if(sh.life <= 0) shards.splice(s,1);
+  }
+
+  // A live trail is still being stretched by the dash, so it doesn't age yet.
+  for(var tr=trails.length-1;tr>=0;tr--){
+    var T = trails[tr];
+    if(!T.live){
+      T.life -= dt;
+      if(T.life <= 0) trails.splice(tr,1);
+    }
+  }
+
+  // UI-ish flourishes age on real time. Slowing down feedback about what already
+  // happened just makes the interface feel unresponsive.
+  for(var q=pops.length-1;q>=0;q--){
+    pops[q].life -= dt;
+    if(pops[q].life <= 0) pops.splice(q,1);
+  }
+  for(var f=floaters.length-1;f>=0;f--){
+    floaters[f].y += floaters[f].vy * dt;
+    floaters[f].life -= dt;
+    if(floaters[f].life <= 0) floaters.splice(f,1);
+  }
+
+  updateCoins(dt, wdt);
+  if(goalBanner > 0) goalBanner = Math.max(0, goalBanner - dt);
+
+  // pow(k, dt) rather than a flat multiply per frame, so the shake decays at the
+  // same rate on a 144Hz monitor as on a 30fps laptop. The floors just snap tiny
+  // residual values to zero so the render path can skip the transform entirely.
+  shake.mag *= Math.pow(0.0016, dt);
+  shake.rot *= Math.pow(0.0016, dt);
+  if(shake.mag < 0.05) shake.mag = 0;
+  if(shake.rot < 0.0002) shake.rot = 0;
+  aber   = Math.max(0, aber   - dt * 4.2);
+  invert = Math.max(0, invert - dt * 8.0);
+
+  // Death holds for a beat before the summary appears. Cutting straight to the
+  // stats screen swallows the explosion you just earned.
+  if(!player.alive){
+    deathT += dt;
+    if(deathT > 0.9){ finishGame(); }
+  }
+}
+
+// Guarded because on a bad frame several enemies and an orb can all reach you at
+// once, and each would otherwise queue up its own explosion and rumble.
+function killPlayer(cause){
+  if(!player.alive) return;
+  player.alive = false;
+  player.dashing = false;
+  deathCause = cause || 'unknown';
+  deathTip = tipForDeath(deathCause);
+  shatter(player.x, player.y, 4, 22, COL.cyan);
+  shatter(player.x, player.y, 3, 15, COL.white);
+  ring(player.x, player.y, COL.cyan, 8, 210, 0.7);
+  ring(player.x, player.y, COL.red, 4, 150, 0.55);
+  addShake(22, 0.03);
+  aber = 0.55; invert = 0.4;
+  SFX.fail();
+}
+
+function finishGame(){
+  if(gameFinished) return;
+  gameFinished = true;
+  finishingFlow = false;
+  rewardClaimed = false;
+  overSettled = false;
+  if(score > highScore && score > 0){
+    highScore = score;
+    storeSet(HS_KEY, highScore);
+    cgHappyTime();
+  }
+  cgGameplayStop();
+  state = 'over';
+  anyRequest = false;
+  dashRequest = false;
+  moveTouch = null;
+  aimTouch = null;
+  // Bank 1× immediately so shop CREDITS matches the run; optional ad adds another copy.
+  settleRunCoins(1);
+}
+
+// Neon is shadowBlur — expensive. Cap blur so long fights stay smooth.
+function glow(g, col, blur){
+  g.shadowColor = col;
+  g.shadowBlur = Math.min(18, blur * 0.65);
+}
+function noGlow(g){
+  g.shadowBlur = 0;
+  g.shadowColor = 'transparent';
+  g.shadowOffsetX = 0;
+  g.shadowOffsetY = 0;
+}
+
+// Every enemy, shard and the player itself is this one function at a different
+// side count. The -PI/2 puts a vertex at the top so triangles point up.
+function poly(g, x, y, r, sides, ang){
+  g.beginPath();
+  for(var i=0;i<sides;i++){
+    var a = ang + (i/sides)*Math.PI*2 - Math.PI/2;
+    var px = x + Math.cos(a)*r, py = y + Math.sin(a)*r;
+    if(i===0) g.moveTo(px,py); else g.lineTo(px,py);
+  }
+  g.closePath();
+}
+
+function roundPath(g, x, y, w, h, r){
+  r = Math.max(0, Math.min(r, w * 0.5, h * 0.5));
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.lineTo(x + w - r, y);
+  g.quadraticCurveTo(x + w, y, x + w, y + r);
+  g.lineTo(x + w, y + h - r);
+  g.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  g.lineTo(x + r, y + h);
+  g.quadraticCurveTo(x, y + h, x, y + h - r);
+  g.lineTo(x, y + r);
+  g.quadraticCurveTo(x, y, x + r, y);
+  g.closePath();
+}
+
+function fillSpaced(g, text, cx, y, tracking){
+  var n = text.length;
+  if(!n) return;
+  var total = 0, i;
+  for(i=0;i<n;i++) total += g.measureText(text.charAt(i)).width;
+  total += tracking * Math.max(0, n - 1);
+  var x = cx - total * 0.5;
+  var align = g.textAlign;
+  g.textAlign = 'left';
+  for(i=0;i<n;i++){
+    var ch = text.charAt(i);
+    g.fillText(ch, x, y);
+    x += g.measureText(ch).width + tracking;
+  }
+  g.textAlign = align;
+}
+
+function strokeCorners(g, x, y, w, h, len){
+  g.beginPath();
+  g.moveTo(x, y + len); g.lineTo(x, y); g.lineTo(x + len, y);
+  g.moveTo(x + w - len, y); g.lineTo(x + w, y); g.lineTo(x + w, y + len);
+  g.moveTo(x + w, y + h - len); g.lineTo(x + w, y + h); g.lineTo(x + w - len, y + h);
+  g.moveTo(x + len, y + h); g.lineTo(x, y + h); g.lineTo(x, y + h - len);
+  g.stroke();
+}
+
+// The grid brightens as time slows, which is a second channel telling you the
+// world is holding its breath. Both loops share one path and one stroke, since a
+// stroke per line would be a few hundred draw calls for a background.
+function drawGrid(g){
+  // Warm floor wash + quiet rules — a room, not a HUD kit.
+  g.save();
+  var floor = g.createRadialGradient(W*0.5, H*0.55, 20, W*0.5, H*0.5, Math.max(W,H)*0.75);
+  floor.addColorStop(0, 'rgba(42,38,52,0.55)');
+  floor.addColorStop(0.55, 'rgba(20,19,26,0.2)');
+  floor.addColorStop(1, 'rgba(8,8,12,0)');
+  g.fillStyle = floor;
+  g.fillRect(0,0,W,H);
+
+  var step = 72;
+  var a = 0.035 + timeScale * 0.04;
+  g.lineWidth = 1;
+  g.strokeStyle = COL.grid;
+  g.globalAlpha = a;
+  g.beginPath();
+  var ox = (globalT * 4) % step;
+  for(var x = -step + ox; x < W + step; x += step){
+    g.moveTo(x, 0); g.lineTo(x, H);
+  }
+  for(var y = -step + ox; y < H + step; y += step){
+    g.moveTo(0, y); g.lineTo(W, y);
+  }
+  g.stroke();
+  g.restore();
+}
+
+function drawVignette(g){
+  var r = Math.max(W,H)*0.85;
+  var grd = g.createRadialGradient(W/2,H/2, r*0.4, W/2,H/2, r);
+  grd.addColorStop(0, 'rgba(0,0,0,0)');
+  grd.addColorStop(1, 'rgba(8,7,12,0.55)');
+  g.fillStyle = grd;
+  g.fillRect(0,0,W,H);
+}
+
+// Edge wash while a chain is hot — single gradient, no second core pass.
+function drawComboHeat(g){
+  if(state !== 'playing' || combo < 3) return;
+  var heat = Math.min(1, (combo - 2) * 0.06 + comboPulse * 0.7 + comboFlash * 0.35);
+  if(heat < 0.08) return;
+  var fuseWarn = comboTimer < 0.7;
+  var rgb = fuseWarn ? '232,69,60'
+    : (combo >= 8 ? '242,236,228' : (combo >= 5 ? '232,184,109' : '125,232,214'));
+  var edge = g.createRadialGradient(W/2, H/2, Math.min(W,H)*0.35, W/2, H/2, Math.max(W,H)*0.72);
+  edge.addColorStop(0, 'rgba(' + rgb + ',0)');
+  edge.addColorStop(1, 'rgba(' + rgb + ',' + (0.05 + heat * 0.14).toFixed(3) + ')');
+  g.fillStyle = edge;
+  g.fillRect(0,0,W,H);
+}
+
+function drawTrails(g){
+  g.save();
+  g.lineCap = 'round';
+  for(var i=0;i<trails.length;i++){
+    var T = trails[i];
+    var k = T.live ? 1 : (T.life / T.max);
+    var a = Math.pow(k, 0.85);
+    glow(g, COL.cyan, 14*a + 4);
+    g.strokeStyle = 'rgba(125,232,214,' + (0.85*a).toFixed(3) + ')';
+    g.lineWidth = T.w * (0.35 + 0.65*a);
+    g.beginPath(); g.moveTo(T.x0,T.y0); g.lineTo(T.x1,T.y1); g.stroke();
+    // A thin near-white line inside the glowing one. Two passes is what sells it
+    // as something incandescent rather than a blurry cyan stripe.
+    noGlow(g);
+    g.strokeStyle = 'rgba(230,255,255,' + (0.7*a).toFixed(3) + ')';
+    g.lineWidth = Math.max(0.6, T.w*0.28*a);
+    g.beginPath(); g.moveTo(T.x0,T.y0); g.lineTo(T.x1,T.y1); g.stroke();
+  }
+  g.restore();
+}
+
+function drawShards(g){
+  g.save();
+  for(var i=0;i<shards.length;i++){
+    var s = shards[i];
+    var a = clamp(s.life / s.max, 0, 1);
+    g.save();
+    g.translate(s.x, s.y);
+    g.rotate(s.ang);
+    g.globalAlpha = a;
+    glow(g, s.col, 6*a);
+    g.strokeStyle = s.col;
+    g.lineWidth = 1.6;
+    g.beginPath();
+    g.moveTo(0, -s.size);
+    g.lineTo(s.size*0.85, s.size*0.7);
+    g.lineTo(-s.size*0.85, s.size*0.7);
+    g.closePath();
+    g.stroke();
+    g.restore();
+  }
+  g.restore();
+  noGlow(g);
+}
+
+function drawDust(g){
+  g.save();
+  g.fillStyle = 'rgba(125,232,214,0.35)';
+  var cx = W * 0.5, cy = H * 0.5;
+  var vx = 0, vy = 0;
+  if(player && player.alive){
+    vx = (player.x - player.px);
+    vy = (player.y - player.py);
+  }
+  for(var i = 0; i < dust.length; i++) {
+    var d = dust[i];
+    d.x -= vx * d.z * 0.5;
+    d.y -= vy * d.z * 0.5;
+    d.x += (Math.cos(globalT * 0.4 + i) * 1.5) * d.z;
+    d.y += (Math.sin(globalT * 0.4 + i) * 1.5) * d.z;
+    if(d.x < 0) d.x += W;
+    if(d.x > W) d.x -= W;
+    if(d.y < 0) d.y += H;
+    if(d.y > H) d.y -= H;
+    var px = (d.x - cx) * d.z + cx;
+    var py = (d.y - cy) * d.z + cy;
+    g.fillRect(px, py, d.size, d.size);
+  }
+  g.restore();
+}
+
+function drawRings(g){
+  g.save();
+  for(var i=0;i<pops.length;i++){
+    var p = pops[i];
+    var t = 1 - (p.life / p.max);
+    var r = lerp(p.r, p.r1, 1 - Math.pow(1-t, 2));
+    var a = 1 - t;
+    g.globalAlpha = a * 0.8;
+    glow(g, p.col, 16*a);
+    g.strokeStyle = p.col;
+    g.lineWidth = Math.max(0.8, 3*a);
+    g.beginPath(); g.arc(p.x, p.y, r, 0, Math.PI*2); g.stroke();
+  }
+  g.restore();
+  noGlow(g);
+}
+
+function drawProjectiles(g){
+  g.save();
+  for(var i=0;i<projectiles.length;i++){
+    var p = projectiles[i];
+    var pu = 0.85 + 0.15*Math.sin(p.phase);
+    var ang = Math.atan2(p.vy, p.vx);
+    var r = p.r * pu;
+    // Hostile bolts: coral diamond + motion streak — not gold discs.
+    g.save();
+    g.translate(p.x, p.y);
+    g.rotate(ang);
+    glow(g, COL.red, 14);
+    g.fillStyle = 'rgba(232,69,60,0.28)';
+    g.beginPath();
+    g.moveTo(r * 1.9, 0);
+    g.lineTo(0, r * 0.85);
+    g.lineTo(-r * 1.15, 0);
+    g.lineTo(0, -r * 0.85);
+    g.closePath();
+    g.fill();
+    g.strokeStyle = COL.red;
+    g.lineWidth = 2;
+    g.stroke();
+    noGlow(g);
+    g.fillStyle = 'rgba(242,236,228,0.92)';
+    g.beginPath();
+    g.moveTo(r * 0.85, 0);
+    g.lineTo(0, r * 0.35);
+    g.lineTo(-r * 0.35, 0);
+    g.lineTo(0, -r * 0.35);
+    g.closePath();
+    g.fill();
+    g.strokeStyle = 'rgba(232,69,60,0.55)';
+    g.lineWidth = 1.5;
+    g.beginPath();
+    g.moveTo(-r * 1.2, 0);
+    g.lineTo(-r * 2.6, 0);
+    g.stroke();
+    g.restore();
+  }
+  g.restore();
+  noGlow(g);
+}
+
+function drawEnemies(g){
+  g.save();
+  for(var i=0;i<enemies.length;i++){
+    var e = enemies[i];
+    var spawnFade = clamp(e.born/0.35, 0, 1);
+    if(state === 'title') spawnFade *= 0.55;
+    var r = e.r;
+    if(e.type === 'phantom') r = e.r * (0.82 + 0.3*(0.5+0.5*Math.sin(e.phase)));
+    var col = e.col || COL.red;
+    g.globalAlpha = spawnFade;
+
+    glow(g, col, e.type==='phantom' ? 14 : 10);
+    g.strokeStyle = col;
+    g.lineWidth = 2.2;
+    poly(g, e.x, e.y, r, e.sides, e.ang);
+    g.stroke();
+
+    noGlow(g);
+    g.fillStyle = e.fill || 'rgba(255,0,85,0.13)';
+    poly(g, e.x, e.y, r*0.96, e.sides, e.ang);
+    g.fill();
+
+    g.strokeStyle = e.inner || 'rgba(255,120,160,0.75)';
+    g.lineWidth = 1;
+    poly(g, e.x, e.y, r*0.44, e.sides, -e.ang*1.5);
+    g.stroke();
+
+    if(e.type === 'gunner'){
+      var ch = e.telegraph || clamp(1 - e.fire/1.4, 0, 1);
+      if(ch > 0.05){
+        glow(g, COL.amber, 14*ch);
+        g.strokeStyle = 'rgba(255,204,51,' + (0.55 + 0.4*ch).toFixed(2) + ')';
+        g.lineWidth = 1.5 + ch;
+        g.beginPath();
+        g.arc(e.x, e.y, r*1.55, -Math.PI/2, -Math.PI/2 + ch*Math.PI*2);
+        g.stroke();
+        // Aim telegraph line toward player when nearly charged.
+        if(ch > 0.45 && player && player.alive){
+          var ad = norm(player.x - e.x, player.y - e.y);
+          g.globalAlpha = spawnFade * Math.min(1, ch * 1.15);
+          g.setLineDash([5, 5]);
+          g.strokeStyle = 'rgba(232,184,109,' + (0.4 + 0.5*ch).toFixed(2) + ')';
+          g.lineWidth = 1.8 + ch;
+          g.beginPath();
+          g.moveTo(e.x + ad.x*r*1.2, e.y + ad.y*r*1.2);
+          g.lineTo(e.x + ad.x*r*7.2, e.y + ad.y*r*7.2);
+          g.stroke();
+          g.setLineDash([]);
+          g.globalAlpha = spawnFade;
+        }
+        noGlow(g);
+      }
+    }
+    if(e.type === 'phantom' && e.telegraph > 0.12){
+      glow(g, COL.violet, 22*e.telegraph);
+      g.strokeStyle = 'rgba(180,77,255,' + (0.42 + 0.55*e.telegraph).toFixed(2) + ')';
+      g.lineWidth = 1.6 + e.telegraph;
+      g.beginPath();
+      g.arc(e.x, e.y, r*(1.9 + e.telegraph*1.1), 0, Math.PI*2);
+      g.stroke();
+      if(e.telegraph > 0.55 && player && player.alive){
+        var pd = norm(player.x - e.x, player.y - e.y);
+        g.globalAlpha = spawnFade * e.telegraph;
+        g.setLineDash([3, 5]);
+        g.beginPath();
+        g.moveTo(e.x, e.y);
+        g.lineTo(e.x + pd.x*r*5, e.y + pd.y*r*5);
+        g.stroke();
+        g.setLineDash([]);
+        g.globalAlpha = spawnFade;
+      }
+      noGlow(g);
+    }
+    if(e.type === 'stalker'){
+      var hv = norm(e.vx, e.vy);
+      if(hv.x || hv.y){
+        g.strokeStyle = 'rgba(255,0,85,0.55)';
+        g.lineWidth = 1.2;
+        g.beginPath();
+        g.moveTo(e.x, e.y);
+        g.lineTo(e.x + hv.x*r*2.4, e.y + hv.y*r*2.4);
+        g.stroke();
+      }
+    }
+  }
+  g.restore();
+  noGlow(g);
+}
+
+function drawPlayer(g){
+  if(!player.alive) return;
+  var r = PLAYER_R;
+  g.save();
+
+  // Ring around the player winds back up as the dash recharges, so cooldown lives
+  // where your eyes already are instead of only in the corner readout.
+  var ready = player.cd <= 0;
+  var cdk = ready ? 1 : (1 - player.cd / dashCd());
+  g.globalAlpha = 1;
+  glow(g, ready ? COL.cyan : COL.cyanD, ready ? 14 : 6);
+  g.strokeStyle = ready ? 'rgba(0,243,255,0.75)' : 'rgba(0,243,255,0.30)';
+  g.lineWidth = ready ? 2 : 3;
+  g.beginPath();
+  g.arc(player.x, player.y, r + 9, -Math.PI/2, -Math.PI/2 + cdk*Math.PI*2);
+  g.stroke();
+
+  // Dashed line plus a reticle at the exact landing spot. Committing 240px blind
+  // is miserable, and showing the destination is what turns the dash from a gamble
+  // into a plan.
+  noGlow(g);
+  g.strokeStyle = 'rgba(0,243,255,0.20)';
+  g.lineWidth = 1;
+  g.setLineDash([6,9]);
+  g.beginPath();
+  var ddx = Math.cos(aim.angle), ddy = Math.sin(aim.angle);
+  var dd = usingTouch ? effectiveDashDist() : dashDist();
+  g.moveTo(player.x + ddx*(r+14), player.y + ddy*(r+14));
+  g.lineTo(player.x + ddx*(r+14+dd*0.86), player.y + ddy*(r+14+dd*0.86));
+  g.stroke();
+  g.setLineDash([]);
+  
+  var lx = clamp(player.x + ddx*dd, r, W-r);
+  var ly = clamp(player.y + ddy*dd, r, H-r);
+  g.strokeStyle = 'rgba(0,243,255,0.35)';
+  g.beginPath(); g.arc(lx, ly, 7, 0, Math.PI*2); g.stroke();
+  g.beginPath(); g.moveTo(lx-11,ly); g.lineTo(lx-4,ly); g.moveTo(lx+4,ly); g.lineTo(lx+11,ly); g.stroke();
+
+  // Custom Neon Reticle at aim coordinates
+  if(!usingTouch){
+    g.save();
+    g.translate(aim.x, aim.y);
+    g.rotate(aim.angle);
+    glow(g, COL.cyan, 12);
+    g.strokeStyle = COL.cyan;
+    g.lineWidth = 1.5;
+    g.beginPath();
+    g.moveTo(-4, 0); g.lineTo(4, 0);
+    g.moveTo(0, -4); g.lineTo(0, 4);
+    g.stroke();
+    
+    var sp = 10 + reticleSpread;
+    var len = 4;
+    g.strokeStyle = 'rgba(0,243,255,0.6)';
+    g.lineWidth = 1;
+    g.beginPath();
+    // top right
+    g.moveTo(sp, sp - len); g.lineTo(sp, sp); g.lineTo(sp - len, sp);
+    // bottom right
+    g.moveTo(sp, -sp + len); g.lineTo(sp, -sp); g.lineTo(sp - len, -sp);
+    // top left
+    g.moveTo(-sp, sp - len); g.lineTo(-sp, sp); g.lineTo(-sp + len, sp);
+    // bottom left
+    g.moveTo(-sp, -sp + len); g.lineTo(-sp, -sp); g.lineTo(-sp + len, -sp);
+    g.stroke();
+    g.restore();
+    noGlow(g);
+  }
+
+  // Brighter mid-dash, which is the cheapest possible way to signal invulnerability.
+  glow(g, COL.cyan, player.dashing ? 18 : 12);
+  g.strokeStyle = COL.cyan;
+  g.lineWidth = 2.4;
+  poly(g, player.x, player.y, r, 4, player.spin*0.6);
+  g.stroke();
+  g.fillStyle = 'rgba(0,243,255,0.18)';
+  poly(g, player.x, player.y, r*0.95, 4, player.spin*0.6);
+  g.fill();
+
+  g.strokeStyle = COL.white;
+  g.lineWidth = 2;
+  g.beginPath();
+  g.moveTo(player.x + ddx*r*0.4, player.y + ddy*r*0.4);
+  g.lineTo(player.x + ddx*(r+9), player.y + ddy*(r+9));
+  g.stroke();
+
+  noGlow(g);
+  g.fillStyle = COL.white;
+  g.beginPath(); g.arc(player.x, player.y, 2.4, 0, Math.PI*2); g.fill();
+
+  // Shows the grace window after landing, so surviving a hair-thin escape looks
+  // deliberate rather than like the hit detection failed.
+  if(player.invuln > 0 && !player.dashing){
+    g.strokeStyle = 'rgba(234,246,255,0.35)';
+    g.lineWidth = 1;
+    g.beginPath(); g.arc(player.x, player.y, r + 4, 0, Math.PI*2); g.stroke();
+  }
+  g.restore();
+  noGlow(g);
+}
+
+function drawFloaters(g){
+  g.save();
+  g.textAlign = 'center';
+  for(var i=0;i<floaters.length;i++){
+    var f = floaters[i];
+    var a = clamp(f.life/f.max, 0, 1);
+    g.globalAlpha = a;
+    g.font = '800 ' + Math.max(14, f.size) + 'px system-ui, -apple-system, sans-serif';
+    glow(g, f.col, 10*a);
+    g.fillStyle = f.col;
+    g.fillText(f.txt, f.x, f.y);
+  }
+  g.restore();
+  noGlow(g);
+}
+
+function drawTouchUI(g){
+  if(!isTouchUI() || state !== 'playing') return;
+  g.save();
+  // Ghost pads so first-time mobile players see the split layout.
+  if(!moveTouch){
+    g.globalAlpha = 0.18;
+    g.strokeStyle = COL.cyan;
+    g.lineWidth = 2;
+    g.beginPath(); g.arc(56, H - 72, 40, 0, Math.PI*2); g.stroke();
+    mono(g, 10, '600');
+    g.fillStyle = COL.cyan;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText('MOVE', 56, H - 72);
+    g.globalAlpha = 1;
+  }
+  if(!aimTouch){
+    g.globalAlpha = 0.18;
+    g.strokeStyle = COL.amber;
+    g.lineWidth = 2;
+    g.beginPath(); g.arc(W - 56, H - 72, 40, 0, Math.PI*2); g.stroke();
+    mono(g, 10, '600');
+    g.fillStyle = COL.amber;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText('BLINK', W - 56, H - 72);
+    g.globalAlpha = 1;
+  }
+  if(moveTouch){
+    g.strokeStyle = 'rgba(125,232,214,0.35)';
+    g.lineWidth = 2;
+    g.beginPath(); g.arc(moveTouch.ox, moveTouch.oy, 58, 0, Math.PI*2); g.stroke();
+    var dx = moveTouch.x-moveTouch.ox, dy = moveTouch.y-moveTouch.oy;
+    var l = len(dx,dy); var m = Math.min(1, l/58);
+    var kx = moveTouch.ox + (l>0?dx/l:0)*58*m, ky = moveTouch.oy + (l>0?dy/l:0)*58*m;
+    glow(g, COL.cyan, 10);
+    g.fillStyle = 'rgba(125,232,214,0.55)';
+    g.beginPath(); g.arc(kx, ky, 20, 0, Math.PI*2); g.fill();
+    noGlow(g);
+  }
+  if(aimTouch){
+    g.strokeStyle = 'rgba(232,184,109,0.55)';
+    g.lineWidth = 2;
+    g.setLineDash([8,8]);
+    g.beginPath(); g.moveTo(aimTouch.sx, aimTouch.sy); g.lineTo(aimTouch.x, aimTouch.y); g.stroke();
+    g.setLineDash([]);
+    g.beginPath(); g.arc(aimTouch.sx, aimTouch.sy, 12, 0, Math.PI*2); g.stroke();
+  }
+  g.restore();
+}
+
+function uiScaleNow(){
+  return Math.max(1, Math.min(W, H) / 800);
+}
+function mono(g, size, weight){
+  var px = Math.max(10, Math.round(size));
+  g.font = (weight||'600') + ' ' + px + 'px "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
+}
+function uiFont(g, size, weight){
+  var px = Math.max(14, Math.round(size));
+  g.font = (weight || '700') + ' ' + px + 'px "IBM Plex Sans", "Segoe UI", sans-serif';
+}
+function displayFont(g, size, weight){
+  var px = Math.max(16, Math.round(size));
+  g.font = (weight || '800') + ' ' + px + 'px Syne, "Arial Black", "Segoe UI", sans-serif';
+}
+function ink(g){
+  g.shadowColor = 'rgba(0,0,0,0.8)';
+  g.shadowBlur = 8;
+  g.shadowOffsetX = 0;
+  g.shadowOffsetY = 1;
+}
+function drawAngledPanel(g, x, y, w, h, cut){
+  g.beginPath();
+  g.moveTo(x + cut, y);
+  g.lineTo(x + w, y);
+  g.lineTo(x + w, y + h - cut);
+  g.lineTo(x + w - cut, y + h);
+  g.lineTo(x, y + h);
+  g.lineTo(x, y + cut);
+  g.closePath();
+}
+
+function fillPanel(g, x, y, w, h, r, border){
+  noGlow(g);
+  drawAngledPanel(g, x, y, w, h, r);
+  g.fillStyle = 'rgba(5, 5, 10, 0.75)';
+  g.fill();
+  g.strokeStyle = border || 'rgba(0,243,255,0.85)';
+  g.lineWidth = 1;
+  g.stroke();
+}
+
+function drawKeyBadge(g, x, y, label, S){
+  var fs = Math.max(14, Math.round(13 * S));
+  var padX = 10 * S, padY = 6 * S;
+  uiFont(g, fs, '800');
+  var tw = g.measureText(label).width;
+  var w = Math.max(tw + padX * 2, 32 * S);
+  var h = fs + padY * 2;
+  noGlow(g);
+  drawAngledPanel(g, x, y, w, h, 4 * S);
+  g.fillStyle = 'rgba(5,5,10,0.85)';
+  g.fill();
+  g.strokeStyle = 'rgba(0,243,255,0.9)';
+  g.lineWidth = Math.max(1, 1.2 * S);
+  g.stroke();
+  ink(g);
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = COL.white;
+  g.fillText(label, x + w * 0.5, y + h * 0.5 + 0.5);
+  noGlow(g);
+  return { w:w, h:h };
+}
+
+function drawWireCard(g, x, y, w, h, S){
+  noGlow(g);
+  drawAngledPanel(g, x, y, w, h, 10 * S);
+  g.fillStyle = 'rgba(5, 5, 10, 0.82)';
+  g.fill();
+  g.strokeStyle = 'rgba(0,243,255,0.55)';
+  g.lineWidth = Math.max(1, 1.2 * S);
+  g.stroke();
+  g.strokeStyle = 'rgba(0,243,255,0.9)';
+  g.lineWidth = Math.max(1.4, 1.6 * S);
+  strokeCorners(g, x, y, w, h, 16 * S);
+}
+
+function isTouchUI(){
+  if(usingTouch) return true;
+  try {
+    if(window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return true;
+  } catch(err){}
+  return false;
+}
+
+function drawTitleCard(g, x, y, w, h, S, title, lines){
+  drawWireCard(g, x, y, w, h, S);
+  var pad = Math.max(16, 20 * S);
+  g.textAlign = 'left';
+  g.textBaseline = 'alphabetic';
+  uiFont(g, Math.max(14, 15 * S), '900');
+  ink(g);
+  g.fillStyle = COL.cyan;
+  g.fillText(title, x + pad, y + pad + 14 * S);
+  noGlow(g);
+  var ly = y + pad + 38 * S;
+  var i;
+  for(i=0;i<lines.length;i++){
+    var row = lines[i];
+    uiFont(g, Math.max(14, 15 * S), '700');
+    ink(g);
+    g.fillStyle = row.hi ? COL.white : 'rgba(234,246,255,0.88)';
+    g.fillText(row.t, x + pad, ly);
+    noGlow(g);
+    ly += 26 * S;
+  }
+}
+
+function drawCTA(g, cx, y, label, S, pulse, hovered){
+  uiFont(g, Math.max(16, 18 * S), '900');
+  var tw = g.measureText(label).width;
+  var btnW = (deployBtn.w > 1) ? deployBtn.w : Math.max(tw + 48 * S, Math.min(W - 40 * S, 420 * S));
+  var btnH = (deployBtn.h > 1) ? deployBtn.h : Math.max(48, 52 * S);
+  deployBtn.x = cx - btnW * 0.5;
+  deployBtn.y = y;
+  deployBtn.w = btnW;
+  deployBtn.h = btnH;
+  drawAngledPanel(g, deployBtn.x, deployBtn.y, deployBtn.w, deployBtn.h, 10 * S);
+  // Solid fill so the CTA reads as the one interactive action, not another wireframe card.
+  g.fillStyle = hovered ? 'rgba(0,243,255,0.32)' : 'rgba(0,243,255,0.16)';
+  g.fill();
+  glow(g, COL.cyan, hovered ? 32 : (14 + pulse * 18));
+  g.strokeStyle = COL.cyan;
+  g.globalAlpha = hovered ? 1 : (0.65 + 0.35 * pulse);
+  g.lineWidth = hovered ? 2.8 * S : 2.2 * S;
+  g.stroke();
+  g.globalAlpha = 1;
+  noGlow(g);
+  g.strokeStyle = 'rgba(234,246,255,0.85)';
+  g.lineWidth = Math.max(1.3, 1.5 * S);
+  strokeCorners(g, deployBtn.x, deployBtn.y, deployBtn.w, deployBtn.h, 14 * S);
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  uiFont(g, Math.max(16, 18 * S), '900');
+  ink(g);
+  glow(g, COL.cyan, hovered ? 16 : 8);
+  g.fillStyle = COL.white;
+  g.fillText(label, cx, y + btnH * 0.5 + 0.5);
+  noGlow(g);
+}
+
+function drawHUD(g){
+  g.save();
+  var S = Math.max(1, Math.min(W, H) / 800);
+  var narrow = W < 720;
+  var pad = (narrow ? 14 : 20) * S;
+
+  // Plain type — no chrome boxes. Shadow keeps it readable on the playfield.
+  g.textAlign = 'left';
+  g.textBaseline = 'top';
+  mono(g, Math.max(11, 11 * S), '600');
+  g.fillStyle = COL.mute;
+  g.fillText('SCORE', pad, pad);
+  displayFont(g, Math.max(26, (narrow ? 28 : 34) * S), '800');
+  g.fillStyle = COL.white;
+  g.shadowColor = 'rgba(0,0,0,0.75)';
+  g.shadowBlur = 6;
+  g.fillText(pad6(score), pad, pad + 14 * S);
+  noGlow(g);
+  mono(g, Math.max(11, 11 * S), '600');
+  g.fillStyle = COL.cyan;
+  g.fillText('best  ' + pad6(highScore), pad, pad + 14 * S + Math.max(26, (narrow ? 28 : 34) * S) + 4 * S);
+  mono(g, Math.max(11, 11 * S), '600');
+  g.fillStyle = COL.amber;
+  g.fillText('coins  ' + runCoins, pad, pad + 14 * S + Math.max(26, (narrow ? 28 : 34) * S) + 20 * S);
+
+  g.textAlign = 'right';
+  displayFont(g, Math.max(18, (narrow ? 18 : 22) * S), '800');
+  g.fillStyle = COL.red;
+  g.shadowColor = 'rgba(0,0,0,0.75)';
+  g.shadowBlur = 6;
+  g.fillText('WAVE ' + wave, W - pad, pad);
+  noGlow(g);
+  mono(g, Math.max(11, 11 * S), '600');
+  g.fillStyle = COL.mute;
+  g.fillText(elapsed.toFixed(1) + 's', W - pad, pad + Math.max(18, (narrow ? 18 : 22) * S) + 4 * S);
+  if(SFX.muted){
+    g.fillStyle = COL.amber;
+    g.fillText('MUTED', W - pad, pad + Math.max(18, (narrow ? 18 : 22) * S) + 20 * S);
+  }
+
+  var topBlock = pad + Math.max(68, 76 * S);
+  if(combo >= 2){
+    var cfs = Math.max(narrow ? 22 : 26, Math.round((narrow ? 24 : 30) * S));
+    var hot = combo >= 100 ? COL.white
+      : (combo >= 50 ? COL.amber
+      : (combo >= 25 ? COL.white
+      : (combo >= 15 ? COL.amber
+      : (combo >= 8 ? COL.white : (combo >= 5 ? COL.amber : COL.cyan)))));
+    var maxT = COMBO_TIME + Math.min(1.2, combo * 0.08);
+    var fuse = clamp(comboTimer / maxT, 0, 1);
+    if(fuse < 0.28) hot = COL.red;
+    var pop = 1 + comboFlash * 0.18 + comboPulse * 0.06;
+    g.save();
+    g.translate(W * 0.5, topBlock);
+    g.scale(pop, pop);
+    g.textAlign = 'center';
+    g.textBaseline = 'top';
+    displayFont(g, cfs, '800');
+    g.fillStyle = hot;
+    g.shadowColor = 'rgba(0,0,0,0.7)';
+    g.shadowBlur = 5;
+    g.globalAlpha = 0.82 + 0.18 * comboFlash;
+    g.fillText(combo + '×', 0, 0);
+    noGlow(g);
+    g.globalAlpha = 1;
+    var fuseW = Math.max(56 * S, 48 * S + combo * 2);
+    var fuseH = Math.max(3, 4 * S);
+    var fy = cfs + 6 * S;
+    g.fillStyle = 'rgba(0,0,0,0.45)';
+    g.fillRect(-fuseW * 0.5, fy, fuseW, fuseH);
+    g.fillStyle = hot;
+    g.fillRect(-fuseW * 0.5, fy, fuseW * fuse, fuseH);
+    g.restore();
+  }
+
+  var barW = Math.min(W - pad * 2, narrow ? 220 * S : 260 * S);
+  var barH = Math.max(4, 5 * S);
+  var bx = (W - barW) * 0.5;
+  var by = H - pad - barH - (isTouchUI() ? 88 : 10) * S;
+  var ready = player.cd <= 0;
+  var frac = ready ? 1 : clamp(1 - (player.cd / dashCd()), 0, 1);
+  g.fillStyle = 'rgba(0,0,0,0.4)';
+  g.fillRect(bx, by, barW, barH);
+  g.fillStyle = ready ? COL.cyan : COL.red;
+  g.fillRect(bx, by, barW * frac, barH);
+  g.textAlign = 'center';
+  g.textBaseline = 'bottom';
+  mono(g, Math.max(11, 11 * S), '600');
+  g.fillStyle = ready ? COL.mute : COL.red;
+  g.fillText(ready ? 'blink ready' : ('wait  ' + player.cd.toFixed(1) + 's'), W * 0.5, by - 5 * S);
+  if(player.chainWindow > 0 && ready){
+    g.fillStyle = COL.cyan;
+    g.globalAlpha = 0.5 + 0.5 * (player.chainWindow / CHAIN_WINDOW);
+    g.fillText('chain', W * 0.5, by - 18 * S);
+    g.globalAlpha = 1;
+  }
+
+  skipBtn.w = 0;
+  if(tutorial.active){
+    if(tutorial.prompt){
+      var tfs = Math.max(15, Math.round(17 * S));
+      uiFont(g, tfs, '700');
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      var ty = H * 0.17;
+      g.fillStyle = 'rgba(12,11,16,0.72)';
+      var tw = g.measureText(tutorial.prompt).width + 28 * S;
+      g.fillRect(W * 0.5 - tw * 0.5, ty - 18 * S, tw, 36 * S);
+      g.fillStyle = COL.white;
+      g.fillText(tutorial.prompt, W * 0.5, ty);
+    }
+    var skW = Math.max(88, 100 * S);
+    var skH = Math.max(34, (isTouchUI() ? 44 : 36) * S);
+    skipBtn.x = W - pad - skW;
+    skipBtn.y = pad;
+    skipBtn.w = skW;
+    skipBtn.h = skH;
+    var skipHot = hitBtn(skipBtn, rawMouse.x, rawMouse.y);
+    g.fillStyle = skipHot ? 'rgba(242,236,228,0.22)' : 'rgba(12,11,16,0.7)';
+    g.fillRect(skipBtn.x, skipBtn.y, skipBtn.w, skipBtn.h);
+    g.strokeStyle = COL.white;
+    g.lineWidth = 1.5;
+    g.strokeRect(skipBtn.x + 0.5, skipBtn.y + 0.5, skipBtn.w - 1, skipBtn.h - 1);
+    displayFont(g, Math.max(13, 14 * S), '800');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = COL.white;
+    g.fillText('SKIP', skipBtn.x + skW * 0.5, skipBtn.y + skH * 0.52);
+    mono(g, Math.max(10, 10 * S), '500');
+    g.fillStyle = COL.mute;
+    g.textBaseline = 'top';
+    g.fillText(isTouchUI() ? 'tap to skip' : 'X to skip', skipBtn.x + skW * 0.5, skipBtn.y + skH + 4 * S);
+    canvas.style.cursor = skipHot ? 'pointer' : 'none';
+    drawControlOverlay(g, S);
+  }
+
+  if(goalBanner > 0 && !tutorial.active && wave <= 2){
+    var ga = clamp(Math.min(1, goalBanner / 0.4) * Math.min(1, goalBanner), 0, 1);
+    g.globalAlpha = ga;
+    uiFont(g, Math.max(13, 14 * S), '600');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = COL.mute;
+    g.fillText('Survive waves · Collect coins · Upgrade', W * 0.5, H * 0.14);
+    g.globalAlpha = 1;
+  }
+
+  if(waveBanner > 0 && !tutorial.active){
+    var a = clamp(Math.min(1, waveBanner/0.35) * Math.min(1, (2.0-waveBanner)/0.18), 0, 1);
+    g.globalAlpha = a;
+    displayFont(g, Math.max(28, 36 * S), '800');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = COL.white;
+    g.shadowColor = 'rgba(0,0,0,0.8)';
+    g.shadowBlur = 8;
+    g.fillText('Wave ' + wave, W * 0.5, H * 0.2);
+    noGlow(g);
+    g.globalAlpha = 1;
+  }
+
+  if(paused){
+    g.fillStyle = 'rgba(12,11,16,0.78)';
+    g.fillRect(0, 0, W, H);
+    displayFont(g, Math.max(36, 44 * S), '800');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = COL.white;
+    g.fillText('Paused', W * 0.5, H * 0.48);
+    mono(g, Math.max(12, 13 * S), '600');
+    g.fillStyle = COL.mute;
+    g.fillText('press P', W * 0.5, H * 0.48 + 32 * S);
+  }
+  g.restore();
+  noGlow(g);
+}
+
+var titleT = 0;
+var menuHover = false;
+var menuHoverB = false;
+var deployBtn = { x:0, y:0, w:0, h:0 };
+var againBtn = { x:0, y:0, w:0, h:0 };
+var menuBtn = { x:0, y:0, w:0, h:0 };
+var skipBtn = { x:0, y:0, w:0, h:0 };
+var rewardBtn = { x:0, y:0, w:0, h:0 };
+var reviveBtn = { x:0, y:0, w:0, h:0 };
+var shopBtns = [];
+var menuHoverR = false;
+var menuHoverV = false;
+
+var SHOP_ITEMS = [
+  { id:'reach', name:'Reach', hint:'Longer blink' },
+  { id:'recovery', name:'Recovery', hint:'Faster recharge' },
+  { id:'magnet', name:'Magnet', hint:'Pull coins farther' }
+];
+
+function drawCoins(g){
+  if(!coins.length) return;
+  g.save();
+  for(var i=0;i<coins.length;i++){
+    var c = coins[i];
+    var pulse = 0.92 + 0.08 * Math.sin(globalT * 7 + c.born * 3);
+    var a = clamp(c.life / 1.2, 0, 1);
+    var r = c.r * pulse;
+    var spin = c.born * 2.2;
+    g.globalAlpha = a;
+    g.save();
+    g.translate(c.x, c.y);
+    g.rotate(spin);
+    // Flat hex coin — silhouette reads as loot, not an orb.
+    glow(g, COL.amber, 7);
+    g.fillStyle = 'rgba(232,184,109,0.22)';
+    poly(g, 0, 0, r * 1.45, 6, 0);
+    g.fill();
+    g.fillStyle = COL.amber;
+    poly(g, 0, 0, r * 1.05, 6, 0);
+    g.fill();
+    noGlow(g);
+    g.strokeStyle = 'rgba(255,236,190,0.95)';
+    g.lineWidth = 1.6;
+    poly(g, 0, 0, r * 1.05, 6, 0);
+    g.stroke();
+    g.strokeStyle = 'rgba(12,11,16,0.55)';
+    g.lineWidth = 1.2;
+    poly(g, 0, 0, r * 0.62, 6, 0);
+    g.stroke();
+    g.fillStyle = COL.ink;
+    g.beginPath();
+    g.arc(0, 0, r * 0.18, 0, Math.PI * 2);
+    g.fill();
+    g.restore();
+  }
+  g.restore();
+  noGlow(g);
+}
+
+function drawKeyCap(g, x, y, w, h, label, lit){
+  g.fillStyle = lit ? 'rgba(125,232,214,0.35)' : 'rgba(12,11,16,0.72)';
+  g.fillRect(x, y, w, h);
+  g.strokeStyle = lit ? COL.cyan : 'rgba(242,236,228,0.35)';
+  g.lineWidth = 1.5;
+  g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  mono(g, Math.max(11, h * 0.38), '600');
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = lit ? COL.cyan : COL.white;
+  g.fillText(label, x + w * 0.5, y + h * 0.52);
+}
+
+function drawControlOverlay(g, S){
+  if(!tutorial.active || isTouchUI()) return;
+  var kw = Math.max(28, 32 * S), kh = kw, gap = 6 * S;
+  var ox = W * 0.5 - (kw * 3 + gap * 2) * 0.5;
+  var oy = H * 0.78;
+  var litW = !!(keys['KeyW']||keys['KeyZ']);
+  var litA = !!(keys['KeyA']||keys['KeyQ']);
+  var litS = !!keys['KeyS'];
+  var litD = !!keys['KeyD'];
+  drawKeyCap(g, ox + kw + gap, oy - kh - gap, kw, kh, 'W', litW);
+  drawKeyCap(g, ox, oy, kw, kh, 'A', litA);
+  drawKeyCap(g, ox + kw + gap, oy, kw, kh, 'S', litS);
+  drawKeyCap(g, ox + (kw + gap) * 2, oy, kw, kh, 'D', litD);
+  mono(g, Math.max(10, 11 * S), '500');
+  g.textAlign = 'center';
+  g.fillStyle = COL.mute;
+  g.fillText('ZQSD also works', W * 0.5, oy + kh + 16 * S);
+  var sw = Math.max(88, 100 * S), sh = Math.max(28, 32 * S);
+  drawKeyCap(g, W * 0.5 - sw * 0.5, oy - kh * 2 - gap * 3, sw, sh, 'SPACE / RMB', !!(keys['Space']||mouse.right));
+}
+
+function drawShopPanel(g, cx, topY, S, maxW, opts){
+  shopBtns.length = 0;
+  opts = opts || {};
+  var compact = !!opts.compact;
+  var panelW = Math.min(maxW || 420 * S, W - (compact ? 24 : 40) * S);
+  var rowH = opts.rowH != null ? opts.rowH : (compact ? Math.max(28, 30 * S) : Math.max(32, 36 * S));
+  var gap = opts.gap != null ? opts.gap : (compact ? 5 : 8 * S);
+  var padX = compact ? Math.max(8, 10 * S) : 12 * S;
+  var x0 = cx - panelW * 0.5;
+  mono(g, Math.max(10, compact ? 11 : 12 * S), '600');
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = COL.amber;
+  g.fillText('CREDITS  ' + bankedCoins, cx, topY);
+  var y = topY + (compact ? 14 : 18 * S);
+  for(var i=0;i<SHOP_ITEMS.length;i++){
+    var it = SHOP_ITEMS[i];
+    var lvl = upgrades[it.id]|0;
+    var cost = upgradeCost(it.id);
+    var maxed = lvl >= UPGRADE_MAX;
+    var can = !maxed && bankedCoins >= cost;
+    var btn = { id: it.id, x: x0, y: y, w: panelW, h: rowH };
+    shopBtns.push(btn);
+    var hovered = hitBtn(btn, rawMouse.x, rawMouse.y);
+    g.fillStyle = hovered && can ? 'rgba(232,184,109,0.22)' : 'rgba(242,236,228,0.06)';
+    g.fillRect(btn.x, btn.y, btn.w, btn.h);
+    g.strokeStyle = can ? COL.amber : 'rgba(242,236,228,0.18)';
+    g.lineWidth = 1;
+    g.strokeRect(btn.x + 0.5, btn.y + 0.5, btn.w - 1, btn.h - 1);
+    g.textAlign = 'left';
+    uiFont(g, Math.max(12, compact ? 13 : 14 * S), '700');
+    g.fillStyle = COL.white;
+    g.fillText(it.name + '  Lv ' + lvl + '/' + UPGRADE_MAX, btn.x + padX, btn.y + (compact ? rowH * 0.5 : rowH * 0.38));
+    if(!compact){
+      mono(g, Math.max(10, 11 * S), '500');
+      g.fillStyle = COL.mute;
+      g.fillText(it.hint, btn.x + padX, btn.y + rowH * 0.72);
+    }
+    g.textAlign = 'right';
+    displayFont(g, Math.max(12, compact ? 13 : 14 * S), '800');
+    g.fillStyle = maxed ? COL.cyan : (can ? COL.amber : COL.mute);
+    g.fillText(maxed ? 'MAX' : (cost + ' BUY'), btn.x + btn.w - padX, btn.y + rowH * 0.52);
+    y += rowH + gap;
+  }
+  return y;
+}
+
+function hitBtn(btn, x, y){
+  return btn.w > 0 && x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h;
+}
+
+function goToMenu(){
+  if(state === 'over') settleRunCoins(1);
+  cgGameplayStop();
+  state = 'title';
+  paused = false;
+  menuHover = false;
+  menuHoverB = false;
+  anyRequest = false;
+  dashRequest = false;
+  moveTouch = null;
+  aimTouch = null;
+  canvas.style.cursor = 'default';
+  resetGame();
+  tutorial.active = false;
+  tutorial.prompt = '';
+  state = 'title';
+  seedTitleAmbient();
+  SFX.resume();
+}
+
+function drawMenuButton(g, btn, label, fill, textCol, hovered){
+  g.fillStyle = hovered ? fill : fill;
+  g.globalAlpha = hovered ? 1 : 0.88;
+  g.fillRect(btn.x, btn.y, btn.w, btn.h);
+  g.globalAlpha = 1;
+  displayFont(g, Math.max(16, Math.min(20, btn.h * 0.42)), '800');
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = textCol;
+  g.fillText(label, btn.x + btn.w * 0.5, btn.y + btn.h * 0.52);
+}
+
+function drawTitle(g){
+  g.save();
+  var S = Math.max(1, Math.min(W, H) / 800);
+  var cx = W * 0.5;
+  var touch = isTouchUI();
+  var narrow = W < 700;
+  var margin = Math.max(20, 24 * S);
+  var reduceMotion = false;
+  try {
+    reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch(err){}
+
+  var vg = g.createRadialGradient(cx, H * 0.4, 24, cx, H * 0.42, Math.max(W, H) * 0.55);
+  vg.addColorStop(0, 'rgba(12,11,16,0.9)');
+  vg.addColorStop(0.55, 'rgba(12,11,16,0.48)');
+  vg.addColorStop(1, 'rgba(12,11,16,0)');
+  g.fillStyle = vg;
+  g.fillRect(0, 0, W, H);
+
+  // Fit the brand to the viewport — no clipping, no decorative slash.
+  var brandSize = Math.min(narrow ? 52 : 72, (W - margin * 2) / 5.2);
+  displayFont(g, brandSize, '800');
+  while(brandSize > 28 && g.measureText('CHRONO').width > W - margin * 2){
+    brandSize -= 1;
+    displayFont(g, brandSize, '800');
+  }
+  var blinkSize = Math.max(22, brandSize * 0.72);
+  var blockH = brandSize + blinkSize + 18 * S;
+  var y0 = Math.max(margin + brandSize * 0.7, H * (narrow ? 0.1 : 0.12));
+
+  g.textAlign = 'center';
+  g.textBaseline = 'alphabetic';
+  displayFont(g, brandSize, '800');
+  g.fillStyle = COL.white;
+  g.shadowColor = 'rgba(0,0,0,0.55)';
+  g.shadowBlur = 8;
+  g.fillText('CHRONO', cx, y0);
+  noGlow(g);
+
+  displayFont(g, blinkSize, '800');
+  g.fillStyle = COL.cyan;
+  g.fillText('BLINK', cx, y0 + blinkSize + 6 * S);
+
+  var y = y0 + blinkSize + 28 * S;
+  uiFont(g, Math.max(14, 15 * S), '600');
+  g.fillStyle = COL.mute;
+  g.fillText('Time only moves when you do.', cx, y);
+
+  y += 22 * S;
+  mono(g, Math.max(12, 12 * S), '600');
+  g.fillStyle = COL.white;
+  g.fillText('best  ' + pad6(highScore), cx, y);
+
+  y += 28 * S;
+  var hint = touch
+    ? 'Left thumb move · Right drag to blink'
+    : 'WASD / ZQSD · Aim · Space / RMB to blink';
+  uiFont(g, Math.max(13, 14 * S), '600');
+  g.fillStyle = 'rgba(242,236,228,0.7)';
+  var hs = Math.max(12, 14 * S);
+  while(hs > 11){
+    uiFont(g, hs, '600');
+    if(g.measureText(hint).width <= W - margin * 2) break;
+    hs -= 0.5;
+  }
+  g.fillText(hint, cx, y);
+
+  y += 22 * S;
+  y = drawShopPanel(g, cx, y, S, Math.min(420 * S, W - margin * 2));
+
+  var pulse = reduceMotion ? 0.75 : (0.55 + 0.45 * (0.5 + 0.5 * Math.sin(titleT * 2.4)));
+  var ctaLabel = 'PLAY';
+  displayFont(g, Math.max(18, 20 * S), '800');
+  var btnH = Math.max(touch ? 42 : 48, (touch ? 44 : 50) * S);
+  var ctaW = Math.min(W - margin * 2, Math.max(180 * S, 240 * S));
+  var btnY = Math.min(H - btnH - margin - (touch ? 20 : 8), Math.max(y + 16 * S, H * (narrow ? 0.78 : 0.8)));
+  deployBtn.x = cx - ctaW * 0.5;
+  deployBtn.y = btnY;
+  deployBtn.w = ctaW;
+  deployBtn.h = btnH;
+  againBtn.w = 0; menuBtn.w = 0;
+  menuHover = hitBtn(deployBtn, rawMouse.x, rawMouse.y);
+  menuHoverB = false;
+  var shopHot = false;
+  for(var si=0;si<shopBtns.length;si++){
+    if(hitBtn(shopBtns[si], rawMouse.x, rawMouse.y)){ shopHot = true; break; }
+  }
+  canvas.style.cursor = (menuHover || shopHot) ? 'pointer' : 'default';
+
+  g.fillStyle = menuHover ? COL.cyan : 'rgba(125,232,214,' + (0.8 + 0.2 * pulse).toFixed(3) + ')';
+  g.fillRect(deployBtn.x, deployBtn.y, deployBtn.w, deployBtn.h);
+  g.fillStyle = COL.ink;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  displayFont(g, Math.max(18, 20 * S), '800');
+  g.fillText(ctaLabel, cx, btnY + btnH * 0.52);
+
+  mono(g, Math.max(10, 11 * S), '500');
+  g.fillStyle = COL.mute;
+  g.textBaseline = 'top';
+  g.fillText(touch ? 'tap PLAY' : 'enter / space  ·  M mute', cx, btnY + btnH + 8 * S);
+
+  g.restore();
+  noGlow(g);
+}
+
+function drawGameOver(g){
+  g.save();
+  var S = Math.max(1, Math.min(W, H) / 800);
+  var touch = isTouchUI();
+  var landscape = W > H;
+  var short = H < 560;
+  var narrow = W < 700 || (touch && !landscape);
+  var compact = touch || short;
+  var padX = Math.max(12, compact ? 14 : 20 * S);
+  var topSafe = Math.max(10, compact ? 12 : 16 * S);
+  var bottomSafe = Math.max(compact ? 20 : 14, touch ? 28 : 14);
+
+  g.fillStyle = 'rgba(12,11,16,0.86)';
+  g.fillRect(0, 0, W, H);
+
+  var cx = W * 0.5;
+  var isNew = (score >= highScore && score > 0);
+  var showDouble = cgAdsOk() && !rewardClaimed && runCoins > 0;
+  var showRevive = cgAdsOk() && !reviveUsed;
+  var adsSide = touch && showDouble && showRevive;
+
+  var btnH = compact
+    ? Math.max(34, Math.min(40, Math.round(H * 0.052)))
+    : Math.max(42, 46 * S);
+  var gap = compact ? 6 : 8 * S;
+  var tipH = 14;
+  var adBlockH = 0;
+  if(showDouble || showRevive){
+    adBlockH = adsSide ? btnH : (((showDouble?1:0)+(showRevive?1:0)) * (btnH + gap) - gap);
+  }
+  var actionH = adBlockH + (adBlockH ? gap : 0) + btnH + tipH;
+  var actionTop = H - bottomSafe - actionH;
+
+  var shopRowH = compact ? Math.max(26, Math.min(32, Math.round(H * 0.042))) : Math.max(32, 36 * S);
+  var shopGap = compact ? 4 : 8 * S;
+  var shopH = (compact ? 14 : 18 * S) + 3 * (shopRowH + shopGap);
+  var shopTop = actionTop - shopH - (compact ? 8 : 12 * S);
+
+  // Content column(s) above the shop
+  var contentBottom = shopTop - (compact ? 6 : 10 * S);
+  var contentTop = topSafe;
+  var twoCol = landscape && short && W >= 640;
+  var leftCx = twoCol ? W * 0.28 : cx;
+  var rightCx = twoCol ? W * 0.72 : cx;
+  var tableW = Math.min(twoCol ? W * 0.42 : 400 * S, W - padX * 2);
+  if(twoCol) tableW = Math.min(tableW, W * 0.44);
+
+  var ts = Math.max(20, Math.min(compact ? 32 : 44 * S, W * (twoCol ? 0.07 : 0.11)));
+  var rowH = compact ? Math.max(18, Math.min(24, Math.round(H * 0.032))) : Math.max(24, 28 * S);
+  var rows = [
+    ['Score', String(score)],
+    ['Coins', '+' + runCoins],
+    ['Best combo', bestCombo + '×'],
+    ['Cuts', String(kills)],
+    ['Lived', elapsed.toFixed(1) + 's']
+  ];
+  if(compact && short){
+    rows = [
+      ['Score', String(score)],
+      ['Coins', '+' + runCoins],
+      ['Combo / Cuts', bestCombo + '×  ·  ' + kills],
+      ['Lived', elapsed.toFixed(1) + 's']
+    ];
+  }
+  var tableH = rows.length * rowH;
+
+  var y0 = contentTop;
+  g.textAlign = 'center';
+  g.textBaseline = 'alphabetic';
+  displayFont(g, ts, '800');
+  g.fillStyle = COL.white;
+  g.fillText("Time's up", leftCx, y0 + ts * 0.85);
+
+  var tableY = y0 + ts + (compact ? 8 : 12 * S);
+  var tableX = leftCx - tableW * 0.5;
+  var i;
+  for(i=0;i<rows.length;i++){
+    var ry = tableY + i * rowH;
+    g.textAlign = 'left';
+    g.textBaseline = 'middle';
+    uiFont(g, Math.max(12, compact ? 13 : 14 * S), '600');
+    g.fillStyle = COL.mute;
+    g.fillText(rows[i][0], tableX, ry + rowH * 0.5);
+    g.textAlign = 'right';
+    displayFont(g, Math.max(14, compact ? 15 : 18 * S), '800');
+    g.fillStyle = (i === 0) ? COL.cyan : ((i === 1) ? COL.amber : COL.white);
+    g.fillText(rows[i][1], tableX + tableW, ry + rowH * 0.5);
+  }
+
+  g.strokeStyle = 'rgba(242,236,228,0.18)';
+  g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(tableX, tableY + tableH + 2);
+  g.lineTo(tableX + tableW, tableY + tableH + 2);
+  g.stroke();
+
+  var afterTable = tableY + tableH + (compact ? 8 : 12 * S);
+  if(deathCause && !(compact && short && twoCol)){
+    var causeLabel = deathCause === 'projectile' ? 'an orb'
+      : deathCause === 'gunner' ? 'a gunner'
+      : deathCause === 'phantom' ? 'a phantom'
+      : deathCause === 'stalker' ? 'a stalker'
+      : 'the room';
+    mono(g, Math.max(10, 11 * S), '600');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = COL.amber;
+    g.fillText('Stopped by ' + causeLabel, leftCx, afterTable);
+    if(!compact || !short){
+      uiFont(g, Math.max(11, 12 * S), '600');
+      g.fillStyle = COL.mute;
+      g.fillText(deathTip || tipForDeath(deathCause), leftCx, afterTable + 14 * S);
+      afterTable += 28 * S;
+    } else {
+      afterTable += 16;
+    }
+  }
+  if(isNew){
+    displayFont(g, Math.max(12, compact ? 13 : 15 * S), '800');
+    g.fillStyle = COL.amber;
+    g.fillText('New best', leftCx, afterTable);
+    afterTable += compact ? 14 : 20 * S;
+  }
+
+  // Shop: right column in landscape, otherwise under stats (anchored above actions)
+  var shopCx = twoCol ? rightCx : cx;
+  var shopW = twoCol ? Math.min(W * 0.46, W - padX * 2) : Math.min(400 * S, W - padX * 2);
+  var shopY = twoCol ? contentTop + 4 : Math.min(shopTop, Math.max(afterTable + 4, shopTop));
+  // If content ran long, pin shop to reserved band so buttons stay on-screen.
+  if(!twoCol) shopY = shopTop;
+  drawShopPanel(g, shopCx, shopY, S, shopW, {
+    compact: compact,
+    rowH: shopRowH,
+    gap: shopGap
+  });
+
+  deployBtn.w = 0;
+  rewardBtn.w = 0;
+  reviveBtn.w = 0;
+
+  var rw = Math.min(shopW, W - padX * 2);
+  var adY = actionTop;
+  if(showDouble || showRevive){
+    if(adsSide){
+      var half = (rw - gap) * 0.5;
+      rewardBtn.x = cx - rw * 0.5;
+      rewardBtn.y = adY;
+      rewardBtn.w = half;
+      rewardBtn.h = btnH;
+      reviveBtn.x = rewardBtn.x + half + gap;
+      reviveBtn.y = adY;
+      reviveBtn.w = half;
+      reviveBtn.h = btnH;
+      adY += btnH + gap;
+    } else {
+      if(showDouble){
+        rewardBtn.x = cx - rw * 0.5;
+        rewardBtn.y = adY;
+        rewardBtn.w = rw;
+        rewardBtn.h = btnH;
+        adY += btnH + gap;
+      }
+      if(showRevive){
+        reviveBtn.x = cx - rw * 0.5;
+        reviveBtn.y = adY;
+        reviveBtn.w = rw;
+        reviveBtn.h = btnH;
+        adY += btnH + gap;
+      }
+    }
+  }
+
+  var navW = rw;
+  var halfW = (navW - gap) * 0.5;
+  againBtn.w = halfW;
+  againBtn.h = btnH;
+  againBtn.x = cx - navW * 0.5;
+  againBtn.y = adY;
+  menuBtn.w = halfW;
+  menuBtn.h = btnH;
+  menuBtn.x = againBtn.x + halfW + gap;
+  menuBtn.y = againBtn.y;
+
+  menuHover = hitBtn(againBtn, rawMouse.x, rawMouse.y);
+  menuHoverB = hitBtn(menuBtn, rawMouse.x, rawMouse.y);
+  menuHoverR = showDouble && hitBtn(rewardBtn, rawMouse.x, rawMouse.y);
+  menuHoverV = showRevive && hitBtn(reviveBtn, rawMouse.x, rawMouse.y);
+  var shopHot = false;
+  for(var si=0;si<shopBtns.length;si++){
+    if(hitBtn(shopBtns[si], rawMouse.x, rawMouse.y)){ shopHot = true; break; }
+  }
+  canvas.style.cursor = (menuHover || menuHoverB || menuHoverR || menuHoverV || shopHot) ? 'pointer' : 'default';
+
+  var pulse = 0.55 + 0.45 * (0.5 + 0.5 * Math.abs(Math.sin(globalT * 2.6)));
+  var adLabelSize = Math.max(11, Math.min(14, btnH * 0.36));
+
+  if(showDouble){
+    g.fillStyle = menuHoverR ? COL.amber : 'rgba(232,184,109,0.88)';
+    g.fillRect(rewardBtn.x, rewardBtn.y, rewardBtn.w, rewardBtn.h);
+    displayFont(g, adLabelSize, '800');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = COL.ink;
+    g.fillText(adsSide ? '2× COINS' : 'WATCH AD  ·  2× COINS', rewardBtn.x + rewardBtn.w * 0.5, rewardBtn.y + btnH * 0.52);
+  } else if(rewardClaimed){
+    mono(g, Math.max(10, 11 * S), '600');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = COL.amber;
+    g.fillText('2× coins claimed', cx, againBtn.y - gap - 4);
+  }
+
+  if(showRevive){
+    g.fillStyle = menuHoverV ? 'rgba(125,232,214,0.55)' : 'rgba(125,232,214,0.22)';
+    g.fillRect(reviveBtn.x, reviveBtn.y, reviveBtn.w, reviveBtn.h);
+    g.strokeStyle = COL.cyan;
+    g.lineWidth = 1.5;
+    g.strokeRect(reviveBtn.x + 0.5, reviveBtn.y + 0.5, reviveBtn.w - 1, reviveBtn.h - 1);
+    displayFont(g, adLabelSize, '800');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = COL.cyan;
+    g.fillText(adsSide ? 'REVIVE' : 'WATCH AD  ·  REVIVE', reviveBtn.x + reviveBtn.w * 0.5, reviveBtn.y + btnH * 0.52);
+  }
+
+  g.fillStyle = menuHover ? COL.white : 'rgba(242,236,228,' + (0.86 + 0.14 * pulse).toFixed(3) + ')';
+  g.fillRect(againBtn.x, againBtn.y, againBtn.w, againBtn.h);
+  displayFont(g, Math.max(13, Math.min(17, btnH * 0.4)), '800');
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = COL.ink;
+  g.fillText('AGAIN', againBtn.x + againBtn.w * 0.5, againBtn.y + btnH * 0.52);
+
+  g.fillStyle = menuHoverB ? 'rgba(125,232,214,0.35)' : 'rgba(125,232,214,0.14)';
+  g.fillRect(menuBtn.x, menuBtn.y, menuBtn.w, menuBtn.h);
+  g.strokeStyle = COL.cyan;
+  g.lineWidth = 1.5;
+  g.strokeRect(menuBtn.x + 0.5, menuBtn.y + 0.5, menuBtn.w - 1, menuBtn.h - 1);
+  g.fillStyle = COL.cyan;
+  g.fillText('MENU', menuBtn.x + menuBtn.w * 0.5, menuBtn.y + btnH * 0.52);
+
+  mono(g, Math.max(9, 10 * S), '500');
+  g.fillStyle = COL.mute;
+  g.textBaseline = 'top';
+  g.fillText(touch ? 'ads optional  ·  tap a button' : 'ads optional  ·  enter = again', cx, againBtn.y + btnH + 4);
+
+  g.restore();
+  noGlow(g);
+}
+
+function drawWorld(g){
+  g.save();
+
+  // Rotating as well as translating is what makes an impact feel like a physical
+  // jolt. The angle stays tiny because even a couple of degrees is a lot here.
+  if(shake.mag > 0 || shake.rot > 0){
+    var ox = rand(-1,1) * shake.mag;
+    var oy = rand(-1,1) * shake.mag;
+    var rot = rand(-1,1) * shake.rot;
+    g.translate(W/2 + ox - cam.x, H/2 + oy - cam.y);
+    g.rotate(rot);
+    g.translate(-W/2, -H/2);
+  } else if(state === 'playing' && (cam.x || cam.y)){
+    g.translate(-cam.x, -cam.y);
+  }
+
+  drawGrid(g);
+  drawDust(g);
+  drawTrails(g);
+  drawRings(g);
+  drawShards(g);
+  drawProjectiles(g);
+  drawEnemies(g);
+  drawCoins(g);
+  if(state === 'playing') drawPlayer(g);
+  drawFloaters(g);
+
+  g.restore();
+
+  // Outside the shake transform, or the dark corners would visibly slide and give
+  // away that the whole scene is being nudged around.
+  drawVignette(g);
+  drawComboHeat(g);
+  if(state === 'playing'){
+    drawTouchUI(g);
+    drawHUD(g);
+  }
+  if(state === 'title') drawTitle(g);
+  if(state === 'over')  drawGameOver(g);
+}
+
+function render(){
+  // The aberration path costs two extra full-screen composites, so it only runs
+  // while the effect is actually visible. The rest of the time the frame goes
+  // straight to the display canvas and none of this happens.
+  // RGB split is the heaviest frame cost — only for a short punch, not a simmer.
+  var useBuffer = (aber > 0.08);
+  var g = useBuffer ? bctx : ctx;
+
+  g.setTransform(DPR,0,0,DPR,0,0);
+  g.globalCompositeOperation = 'source-over';
+  g.globalAlpha = 1;
+  noGlow(g);
+  g.fillStyle = COL.bg;
+  g.fillRect(0,0,W,H);
+
+  drawWorld(g);
+
+  if(useBuffer){
+    // Real RGB split, without ever reading pixels back. Multiplying the frame by
+    // pure red leaves only the red channel; multiplying by cyan leaves green and
+    // blue. Adding those two halves back with 'lighter' reconstructs the original
+    // exactly, so nudging them in opposite directions is what tears the colour
+    // apart — and it lands back on the untouched image as the effect decays.
+    //
+    // Everything here works in device pixels, hence the identity transforms and
+    // the *DPR on the offsets.
+    var d = aber * 5.5;
+
+    cctx.setTransform(1,0,0,1,0,0);
+    cctx.globalCompositeOperation = 'source-over';
+    cctx.clearRect(0,0,chan.width,chan.height);
+    cctx.drawImage(buf, 0, 0);
+    cctx.globalCompositeOperation = 'multiply';
+    cctx.fillStyle = '#ff0000';
+    cctx.fillRect(0,0,chan.width,chan.height);
+
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    noGlow(ctx);
+    // Must be opaque black rather than cleared: 'lighter' against transparency
+    // produces washed-out edges.
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(chan, -d*DPR, 0);
+
+    cctx.globalCompositeOperation = 'source-over';
+    cctx.clearRect(0,0,chan.width,chan.height);
+    cctx.drawImage(buf, 0, 0);
+    cctx.globalCompositeOperation = 'multiply';
+    cctx.fillStyle = '#00ffff';
+    cctx.fillRect(0,0,chan.width,chan.height);
+    ctx.drawImage(chan, d*DPR, 0);
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+
+  // 'difference' against white inverts whatever is underneath, which is a one-fill
+  // way to get a full-screen negative flash on a big multi-kill.
+  if(invert > 0.04){
+    ctx.save();
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    ctx.globalCompositeOperation = 'difference';
+    ctx.globalAlpha = Math.min(0.55, invert * 0.55);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // Skip scanlines while the expensive aber path is active.
+  if(scanPattern && !useBuffer){
+    ctx.save();
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    ctx.globalAlpha = 0.02;
+    ctx.fillStyle = scanPattern;
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function startGame(){
+  if(state === 'over') settleRunCoins(1);
+  resetGame();
+  state = 'playing';
+  menuHover = false;
+  canvas.style.cursor = 'none';
+  SFX.start();
+  anyRequest = false;
+  dashRequest = false;
+  cgGameplayStart();
+}
+
+var last = 0;
+function frame(now){
+  // First frame has no previous timestamp, and rAF hands us a page-relative time
+  // that can already be seconds in — without this the run opens with a huge dt.
+  if(!last) last = now;
+  // Capped at 100ms. Come back to a backgrounded tab and the real gap is measured
+  // in seconds, which would teleport every enemy straight through the player. A
+  // capped step means the world simply advances less than real time, which nobody
+  // notices, rather than tunnelling.
+  var dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+
+  // The menu states run their own trimmed-down update. They still need particles and
+  // effect decay ticking over, but nothing that could kill or score.
+  if(state === 'title'){
+    titleT += dt;
+    globalT += dt;
+    aber   = Math.max(0, aber - dt*4.2);
+    invert = Math.max(0, invert - dt*8);
+    shake.mag *= Math.pow(0.0016, dt);
+    shake.rot *= Math.pow(0.0016, dt);
+    updateTitleAmbient(dt);
+    for(var s=shards.length-1;s>=0;s--){
+      var sh = shards[s];
+      sh.x += sh.vx*dt; sh.y += sh.vy*dt;
+      sh.vx *= (1-2.1*dt); sh.vy *= (1-2.1*dt);
+      sh.ang += sh.spin*dt; sh.life -= dt;
+      if(sh.life <= 0) shards.splice(s,1);
+    }
+    for(var q=pops.length-1;q>=0;q--){ pops[q].life -= dt; if(pops[q].life<=0) pops.splice(q,1); }
+    anyRequest = false;
+  } else if(state === 'playing'){
+    if(CG.adOpen || finishingFlow){
+      globalT += dt;
+    } else if(!paused) update(dt);
+    else globalT += dt;
+    anyRequest = false;
+  } else {
+    // Game over: the death explosion keeps playing behind the stats panel.
+    globalT += dt;
+    aber   = Math.max(0, aber - dt*4.2);
+    invert = Math.max(0, invert - dt*8);
+    shake.mag *= Math.pow(0.0016, dt);
+    shake.rot *= Math.pow(0.0016, dt);
+    var sdt = dt*0.8;
+    for(var s2=shards.length-1;s2>=0;s2--){
+      var h = shards[s2];
+      h.x += h.vx*sdt; h.y += h.vy*sdt;
+      h.vx *= (1-2.1*sdt); h.vy *= (1-2.1*sdt);
+      h.ang += h.spin*sdt; h.life -= sdt;
+      if(h.life <= 0) shards.splice(s2,1);
+    }
+    for(var q2=pops.length-1;q2>=0;q2--){ pops[q2].life -= dt; if(pops[q2].life<=0) pops.splice(q2,1); }
+    for(var f=floaters.length-1;f>=0;f--){ floaters[f].life -= dt; if(floaters[f].life<=0) floaters.splice(f,1); }
+    anyRequest = false;
+    dashRequest = false;
+  }
+
+  render();
+  requestAnimationFrame(frame);
+}
+
+// Boot game immediately (file:// safe). SDK loads in the background on http(s).
+function bootTitle(){
+  loadProgress();
+  resetGame();
+  tutorial.active = false;
+  tutorial.prompt = '';
+  state = 'title';
+  seedTitleAmbient();
+  requestAnimationFrame(frame);
+}
+bootTitle();
+applySdkMute(null); // honor ?muteAudio=true even before SDK
+loadCrazyGamesSdkScript()
+  .then(function(ok){ return ok ? initCrazyGames() : false; })
+  .then(function(ready){ if(ready) loadProgress(); })
+  .catch(function(){});
+
+// Opt-in playtest bridge — only when ?harness=1 so normal play stays untouched.
+if(/[?&]harness=1(?:&|$)/.test(location.search)){
+  window.__CHRONO__ = {
+    get: function(){
+      return {
+        state: state,
+        score: score,
+        combo: combo,
+        comboTimer: comboTimer,
+        bestCombo: bestCombo,
+        kills: kills,
+        wave: wave,
+        elapsed: elapsed,
+        cd: player ? player.cd : 0,
+        alive: player ? player.alive : false,
+        tutorial: tutorial.active ? tutorial.step : -1,
+        runCoins: runCoins,
+        bankedCoins: bankedCoins,
+        upgrades: { reach: upgrades.reach, recovery: upgrades.recovery, magnet: upgrades.magnet },
+        cg: { ready: CG.ready, env: CG.env, adOpen: CG.adOpen },
+        W: W, H: H
+      };
+    },
+    start: function(opts){
+      opts = opts || {};
+      if(opts.skipTutorial){
+        tutorialSeen = true;
+        try { storeSet(TUT_KEY, '1'); } catch(e){}
+      }
+      startGame();
+      if(opts.skipTutorial){
+        tutorial.active = false;
+        tutorial.prompt = '';
+      }
+    },
+    aimAt: function(x, y){
+      rawMouse.x = x; rawMouse.y = y;
+      aim.x = x; aim.y = y;
+      aim.angle = Math.atan2(y - player.y, x - player.x);
+    },
+    dash: function(){ dashRequest = true; },
+    move: function(codes){
+      keys = Object.create(null);
+      (codes || []).forEach(function(c){ keys[c] = true; });
+    },
+    stageCombo: function(n){
+      combo = Math.max(0, n|0);
+      comboTimer = COMBO_TIME + Math.min(2.4, combo * 0.1);
+      comboFlash = 1;
+      comboPulse = Math.min(1, 0.4 + Math.min(0.55, combo * 0.04));
+      if(player && player.alive) triggerComboFx(combo, false);
+    },
+    menu: function(){ goToMenu(); },
+    skipTutorial: function(){ skipTutorial(); },
+    setCoins: function(n){
+      bankedCoins = Math.max(0, n|0);
+      saveBank();
+    },
+    buy: function(id){ return tryBuyUpgrade(id); },
+    setDashCd: function(t){
+      if(player) player.cd = Math.max(0, t);
+    },
+    aimNearest: function(){
+      if(!player || !enemies.length) return false;
+      var best = null, bestD = 1e15;
+      for(var i=0;i<enemies.length;i++){
+        var e = enemies[i];
+        var d = len(e.x - player.x, e.y - player.y);
+        if(d < bestD){ bestD = d; best = e; }
+      }
+      if(!best) return false;
+      this.aimAt(best.x, best.y);
+      return true;
+    },
+    stageOver: function(opts){
+      opts = opts || {};
+      score = opts.score != null ? opts.score : 4200;
+      bestCombo = opts.bestCombo != null ? opts.bestCombo : 7;
+      kills = opts.kills != null ? opts.kills : 18;
+      elapsed = opts.elapsed != null ? opts.elapsed : 42.5;
+      runCoins = opts.runCoins != null ? opts.runCoins : 18;
+      runCoinBanked = false;
+      overSettled = false;
+      rewardClaimed = false;
+      deathCause = opts.cause || 'stalker';
+      deathTip = tipForDeath(deathCause);
+      if(score > highScore) highScore = score;
+      gameFinished = true;
+      state = 'over';
+      player.alive = false;
+    },
+    canvas: canvas
+  };
+}
+
+})();
+</script>
+</body>
+</html>
