@@ -7,6 +7,12 @@ A top-down HTML5 arena where time only flows when you move, and a blink-dash is 
 </p>
 
 <p align="center">
+  <a href="covers/gameplay-landscape.mp4"><strong>Gameplay (landscape)</strong></a>
+  &nbsp;·&nbsp;
+  <a href="covers/gameplay-portrait.mp4"><strong>Gameplay (portrait)</strong></a>
+</p>
+
+<p align="center">
   <strong><a href="https://ander507.github.io/CHRONO---BLINK/">Play in the browser</a></strong><br/>
   No install. Or open <code>index.html</code> locally — same file.
 </p>
