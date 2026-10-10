@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>SDK Starter — Orb Tapper</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0b12; color: #eceaf6; font: 600 16px system-ui, sans-serif; overflow: hidden; }
+      #hud { position: fixed; top: 12px; left: 14px; right: 14px; display: flex; justify-content: space-between; pointer-events: none; }
+      #msg { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; pointer-events: none; }
+      canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+      small { color: #9d9ab4; font-weight: 500; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <div id="hud"><span id="score">0</span><span id="time">20.0s</span></div>
+    <div id="msg"><div><div style="font-size:28px">Orb Tapper</div><small>Click / tap orbs for 20 seconds · Space or tap to start</small><div id="status"></div></div></div>
+
+    <!-- 1. Load the SDK from the game origin. It 404s harmlessly elsewhere. -->
+    <script src="/sdk/v1/chronoblink.js"></script>
+    <script>
+      // A tiny but complete ChronoBlink integration. Max 4 points/second.
+      const SDK = window.ChronoBlink || {
+        init: async () => ({ platform: "standalone", player: { isGuest: true } }),
+        loadingDone() {}, gameplayStart() {}, gameplayStop() {},
+        submitScore: async () => ({ accepted: false, reason: "standalone" }),
+        unlockAchievement: async () => ({ unlocked: false }),
+        saveData: async () => true, loadData: async () => null, on() {}, track() {},
+      };
+      const c = document.getElementById("c"), g = c.getContext("2d");
+      const $ = (id) => document.getElementById(id);
+      let W, H, state = "title", score = 0, left = 20, orb = null, best = 0, paused = false, lastHit = 0;
+      function resize() { W = c.width = innerWidth; H = c.height = innerHeight; }
+      addEventListener("resize", resize); resize();
+      const spawn = () => (orb = { x: 40 + Math.random() * (W - 80), y: 60 + Math.random() * (H - 120), r: 26 });
+
+      function start() {
+        state = "play"; score = 0; left = 20; spawn();
+        $("msg").style.display = "none";
+        SDK.gameplayStart();                                  // 2. a run begins (server starts timing)
+      }
+      async function finish() {
+        state = "over";
+        SDK.gameplayStop();                                   // 3. the run ends
+        $("msg").style.display = "grid";
+        $("status").innerHTML = "<small>Submitting…</small>";
+        const r = await SDK.submitScore({ leaderboard: "highscore", score });   // 4. one score per run
+        $("status").innerHTML = "<small>" + (r.accepted ? "Score posted" + (r.rank ? " · rank #" + r.rank : "")
+          : r.reason === "guest" ? "Sign in on ChronoBlink to rank" : "Score: " + score) + "</small>";
+        if (score > best) { best = score; SDK.saveData("best", best); }      // 5. persist via the SDK
+        SDK.track("run_end", { score });
+      }
+      function hit(x, y) {
+        if (state !== "play" || paused || !orb) return;
+        const now = performance.now();
+        if (now - lastHit < 250) return;                      // caps the score rate at 4/s
+        if (Math.hypot(x - orb.x, y - orb.y) <= orb.r + 8) {
+          lastHit = now; score++; spawn();
+          if (score === 10) SDK.unlockAchievement("ten_orbs");                  // 6. game-reported achievement
+        }
+      }
+      c.addEventListener("pointerdown", (e) => (state === "play" ? hit(e.clientX, e.clientY) : start()));
+      addEventListener("keydown", (e) => {
+        if (e.code === "Space" || e.code.startsWith("Arrow")) e.preventDefault();  // never scroll the host page
+        if (e.code === "Space" && state !== "play") start();
+      });
+      SDK.on("pause", () => (paused = true));                 // 7. platform events
+      SDK.on("resume", () => (paused = false));
+
+      let last = performance.now();
+      function frame(t) {
+        const dt = Math.min(0.1, (t - last) / 1000); last = t;
+        if (state === "play" && !paused) { left -= dt; if (left <= 0) { left = 0; finish(); } }
+        g.fillStyle = "#0b0b12"; g.fillRect(0, 0, W, H);
+        if (state === "play" && orb) {
+          g.beginPath(); g.arc(orb.x, orb.y, orb.r, 0, Math.PI * 2);
+          g.fillStyle = "#8b6cff"; g.shadowColor = "#3cc4ff"; g.shadowBlur = 24; g.fill(); g.shadowBlur = 0;
+        }
+        $("score").textContent = "Score " + score + (best ? "  ·  best " + best : "");
+        $("time").textContent = left.toFixed(1) + "s";
+        requestAnimationFrame(frame);
+      }
+      SDK.init().then(async () => {
+        best = (await SDK.loadData("best")) || 0;
+        SDK.loadingDone();
+      });
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

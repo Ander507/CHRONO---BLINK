@@ -1,3 +1,25 @@
 .cursor/
 devlogs/
 .tmp-gif/
+
+# deps / build
+node_modules/
+.next/
+out/
+dist/
+packages/sdk/dist/
+public/sdk/
+*.tsbuildinfo
+next-env.d.ts
+
+# local data
+.data/
+.env
+.env.*
+!.env.example
+
+# tests
+test-results/
+playwright-report/
+blob-report/
+coverage/

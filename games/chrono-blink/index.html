@@ -27,6 +27,8 @@
 </head>
 <body>
 <canvas id="game"></canvas>
+<!-- ChronoBlink Arcade SDK. Served by the arcade's game origin; 404s harmlessly elsewhere. -->
+<script src="/sdk/v1/chronoblink.js" onerror="this.remove()"></script>
 <script>
 (function(){
 "use strict";
@@ -99,7 +101,87 @@ var CG = {
   sdkMute: false
 };
 
+// ---- ChronoBlink Arcade bridge ----
+// Active only inside the ChronoBlink player (sandboxed iframe + SDK present).
+// The arcade runs games on an opaque origin where localStorage throws, so
+// progress goes through the SDK: cloud saves when signed in, device-local
+// saves for guests. Everywhere else this is inert and nothing changes.
+var CB = { sdk: null, ready: false, cache: null, saveTimer: 0, status: '', autoPaused: false, playing: false };
+var CB_SAVE_KEY = 'progress';
+function cbAvailable(){
+  try { return !!(window.ChronoBlink && window.parent !== window); } catch(e){ return false; }
+}
+function cbScheduleSave(){
+  if(!CB.ready) return;
+  clearTimeout(CB.saveTimer);
+  CB.saveTimer = setTimeout(function(){
+    try { CB.sdk.saveData(CB_SAVE_KEY, CB.cache).catch(function(){}); } catch(e){}
+  }, 400);
+}
+function cbRunStart(){
+  if(!CB.ready || CB.playing) return;
+  CB.playing = true;
+  CB.status = '';
+  try { CB.sdk.gameplayStart(); } catch(e){}
+}
+function cbRunStop(){
+  if(!CB.ready || !CB.playing) return false;
+  CB.playing = false;
+  try { CB.sdk.gameplayStop(); } catch(e){}
+  return true;
+}
+function cbSubmitScore(value){
+  if(!cbRunStop() || value <= 0) return;
+  CB.status = 'Submitting score…';
+  CB.sdk.submitScore({ leaderboard: 'highscore', score: Math.floor(value) }).then(function(r){
+    if(r && r.accepted){
+      CB.status = (r.rank ? 'Ranked #' + r.rank : 'Score submitted') + (r.provisional ? '  ·  provisional board' : '');
+    } else if(r && r.reason === 'guest'){
+      CB.status = 'Sign in on ChronoBlink to rank';
+    } else if(r && r.reason === 'rejected'){
+      CB.status = 'Score not accepted';
+    } else {
+      CB.status = '';
+    }
+  }).catch(function(){ CB.status = ''; });
+}
+function cbInit(){
+  if(!cbAvailable()) return;
+  var sdk = window.ChronoBlink;
+  sdk.init().then(function(r){
+    if(!r || r.platform !== 'chronoblink') return;
+    CB.sdk = sdk;
+    sdk.on('pause', function(){
+      if(state === 'playing' && !paused){ paused = true; CB.autoPaused = true; }
+      try { if(SFX.ac && SFX.ac.state === 'running') SFX.ac.suspend(); } catch(e){}
+    });
+    sdk.on('resume', function(){
+      if(CB.autoPaused){ paused = false; CB.autoPaused = false; }
+      try { if(SFX.ac && SFX.ac.state === 'suspended') SFX.ac.resume(); } catch(e){}
+    });
+    sdk.on('mute', function(){ SFX.muted = true; });
+    sdk.on('unmute', function(){ SFX.muted = false; });
+    if(r.settings && r.settings.muted) SFX.muted = true;
+    return sdk.loadData(CB_SAVE_KEY).then(function(data){
+      CB.cache = {};
+      var keys = [HS_KEY, TUT_KEY, COINS_KEY, UP_KEY];
+      if(data && typeof data === 'object'){
+        for(var i=0;i<keys.length;i++){
+          if(typeof data[keys[i]] === 'string') CB.cache[keys[i]] = data[keys[i]];
+        }
+      }
+      CB.ready = true;
+      loadProgress();
+      if(state === 'playing') cbRunStart();
+      sdk.loadingDone();
+    });
+  }).catch(function(){});
+}
+
 function storeGet(key){
+  if(CB.ready && CB.cache){
+    return Object.prototype.hasOwnProperty.call(CB.cache, key) ? CB.cache[key] : null;
+  }
   if(CG.ready && CG.data){
     try {
       var v = CG.data.getItem(key);
@@ -110,6 +192,11 @@ function storeGet(key){
 }
 function storeSet(key, value){
   value = String(value);
+  if(CB.ready && CB.cache){
+    CB.cache[key] = value;
+    cbScheduleSave();
+    return;
+  }
   if(CG.ready && CG.data){
     try {
       CG.data.setItem(key, value);
@@ -231,6 +318,7 @@ function loadProgress(){
 // init would just land in environment "disabled" and every call would no-op.
 function shouldUseCrazyGames(){
   if(location.protocol === 'file:') return false;
+  if(cbAvailable()) return false;
   if(window.CrazyGames && window.CrazyGames.SDK) return true;
   if(/[?&]cg=1(?:&|$)/.test(location.search)) return true;
   var h = (location.hostname || '').toLowerCase();
@@ -1859,6 +1947,7 @@ function finishGame(){
     cgHappyTime();
   }
   cgGameplayStop();
+  cbSubmitScore(score);
   state = 'over';
   anyRequest = false;
   dashRequest = false;
@@ -2842,6 +2931,7 @@ function hitBtn(btn, x, y){
 function goToMenu(){
   if(state === 'over') settleRunCoins(1);
   cgGameplayStop();
+  cbRunStop();
   state = 'title';
   paused = false;
   menuHover = false;
@@ -3099,6 +3189,14 @@ function drawGameOver(g){
     g.fillStyle = COL.amber;
     g.fillText('New best', leftCx, afterTable);
     afterTable += compact ? 14 : 20 * S;
+  }
+  if(CB.ready && CB.status){
+    mono(g, Math.max(10, compact ? 11 : 12 * S), '600');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = COL.cyan;
+    g.fillText(CB.status, leftCx, afterTable);
+    afterTable += compact ? 14 : 18 * S;
   }
 
   // Shop: right column in landscape, otherwise under stats (anchored above actions)
@@ -3362,6 +3460,7 @@ function startGame(){
   anyRequest = false;
   dashRequest = false;
   cgGameplayStart();
+  cbRunStart();
 }
 
 var last = 0;
@@ -3438,6 +3537,7 @@ function bootTitle(){
 }
 bootTitle();
 applySdkMute(null); // honor ?muteAudio=true even before SDK
+cbInit();
 loadCrazyGamesSdkScript()
   .then(function(ok){ return ok ? initCrazyGames() : false; })
   .then(function(ready){ if(ready) loadProgress(); })

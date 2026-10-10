@@ -1,0 +1,18 @@
+{
+  "name": "@chronoblink/sdk",
+  "version": "1.0.0",
+  "description": "ChronoBlink Arcade game SDK — scores, achievements, cloud saves and lifecycle events for HTML5 games.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "sideEffects": false
+}
